@@ -1,7 +1,7 @@
 import AMapLoader from "@amap/amap-jsapi-loader";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
-const API_BASE = import.meta.env.VITE_API_BASE || "http://127.0.0.1:8000";
+const API_BASE = import.meta.env.VITE_API_BASE === undefined ? "http://127.0.0.1:8000" : import.meta.env.VITE_API_BASE;
 const AMAP_KEY = import.meta.env.VITE_AMAP_KEY || "";
 const AMAP_SECURITY_JS_CODE = import.meta.env.VITE_AMAP_SECURITY_JS_CODE || "";
 const DEFAULT_MAP_CENTER = [113.93646, 22.53332];
