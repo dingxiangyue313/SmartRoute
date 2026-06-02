@@ -47,19 +47,23 @@
 
 ## P2 - 技术增强
 
-- 接入 DeepSeek Function Calling / ToolUse。
-- 将 Intent Parser 升级为 LLM + 规则兜底。
-- 将实时调整做成 ReAct 风格工具调用：
+- [x] 增加 DeepSeek Key 配置说明，Key 只放后端 `.env`，无 Key 时规则兜底。
+- [x] 将 Intent Parser 升级为 LLM + 规则兜底，返回 `parser_source`、`parser_confidence`、`parser_reason` 和 `llm_slots`。
+- [x] 新增评委即时画像弹窗，首次调起 SmartRoute 时采集同行人群、预算、排队、移动方式和内容偏好。
+- [x] 将评委选择保存为 `judge-session` 脱敏画像，复用 `manual_import` 链路参与路线召回和排序。
+- [x] 将实时调整做成 ReAct / ToolUse 风格工具调用，并返回 `tool_trace`：
   - Parse adjustment
   - Search replacement POI
   - Validate constraints
   - Update route
   - Explain changes
-- 深化高德路径规划：公交/步行/驾车策略可配置，加入更精细的分段交通说明。
-- 接入真实美团 POI 或美团 LBS 数据源，替代当前高德/本地兜底 POI。
-- 拿到美团或大赛方授权后，启用 `official_api` profile adapter。
-- 增加真实账号授权、数据最小化和合规审计说明。
-- 增加端到端测试和前端自动化测试。
+- [x] 深化高德路径规划：支持步行、公交/地铁、打车/驾车策略，返回更细的分段交通说明和降级原因。
+- [x] 优化高德锚点解析：POI 文本搜索优先、地理编码兜底，避免“中山大学”等口语地点被错误解析成同名城市地址。
+- [x] Agent 解释面板展示 LLM 解析、即时画像、ToolUse trace、高德数据来源和调整前后变化。
+- [x] 文档补充真实账号授权、数据最小化和合规边界说明。
+- [ ] 接入真实美团 POI 或美团 LBS 数据源，替代当前高德/本地兜底 POI。
+- [ ] 拿到美团或大赛方授权后，启用 `official_api` profile adapter。
+- [ ] 增加端到端测试和前端自动化测试。
 
 ## P3 - 部署与交付
 
@@ -75,6 +79,7 @@
 - 城市切换：`我下午要去外滩玩3个小时，帮我规划一个路线`
 - 收藏夹：勾选深圳大学/科技园附近 2-5 个收藏商户后点击“一键排路线”
 - POI 详情页：从 `gaga（金地威新中心店）` 出发，补齐顺路可逛地点
+- P2 即时画像：首次调起 SmartRoute 时选择“带爸妈 / 尽量不排队 / 少走路 / 展览文化”，观察路线和解释变化
 - 低排队：`想吃上海特色，但不想排队超过15分钟，4个人，晚上6点出发`
 - 带爸妈：`带爸妈在上海玩半天，少走路，轻松一点，预算人均300`
 - 文艺体验：`帮我规划一个上海外滩附近的文艺下午，时间3小时，两个人，预算200，不想排队`

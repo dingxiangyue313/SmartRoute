@@ -115,6 +115,7 @@ class RouteContext(BaseModel):
     anchor_text: str | None = None
     anchor_location: GeoPoint | None = None
     selected_pois: list[RouteContextPOI] = Field(default_factory=list)
+    transport_strategy: str | None = None
 
 
 class UserProfile(BaseModel):
@@ -151,6 +152,10 @@ class ParsedIntent(BaseModel):
     extracted_preferences: dict[str, Any] = Field(default_factory=dict)
     clarification_needed: bool = False
     clarification_question: str | None = None
+    parser_source: str = "rules"
+    parser_confidence: float = Field(default=0.72, ge=0, le=1)
+    parser_reason: str = "规则解析"
+    llm_slots: dict[str, Any] = Field(default_factory=dict)
 
 
 class RouteIntentResult(BaseModel):

@@ -1666,6 +1666,171 @@ main {
   display: none;
 }
 
+.preference-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.36);
+  backdrop-filter: blur(8px);
+}
+
+.preference-modal {
+  width: min(560px, calc(100vw - 40px));
+  border-radius: 24px;
+  background: #fff;
+  box-shadow: 0 28px 80px rgba(0, 0, 0, 0.2);
+  padding: 24px;
+}
+
+.preference-modal-head span {
+  color: #111;
+  border-radius: 999px;
+  background: var(--yellow);
+  padding: 7px 10px;
+  font-size: 12px;
+  font-weight: 950;
+}
+
+.preference-modal-head h2 {
+  margin: 15px 0 8px;
+  font-size: 24px;
+  letter-spacing: 0;
+}
+
+.preference-modal-head p,
+.privacy-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.preference-question-grid {
+  display: grid;
+  gap: 12px;
+  margin: 18px 0;
+}
+
+.preference-question {
+  border-radius: 16px;
+  border: 1px solid #eeeeee;
+  background: #fafafa;
+  padding: 12px;
+}
+
+.preference-question strong {
+  display: block;
+  margin-bottom: 9px;
+  font-size: 13px;
+}
+
+.preference-question div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.preference-question button {
+  min-height: 32px;
+  border: 1px solid #e4e4e4;
+  border-radius: 999px;
+  background: #fff;
+  color: #333;
+  padding: 0 11px;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.preference-question button.active {
+  border-color: #111;
+  background: #111;
+  color: #fff;
+}
+
+.preference-modal-actions {
+  display: grid;
+  grid-template-columns: 1fr 1.4fr;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.preference-modal-actions button {
+  min-height: 44px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--yellow);
+  color: #111;
+  font-weight: 950;
+}
+
+.preference-modal-actions button.secondary {
+  background: #f3f3f3;
+  color: #444;
+}
+
+.tool-trace {
+  display: grid;
+  gap: 9px;
+}
+
+.tool-trace article {
+  border-radius: 14px;
+  border: 1px solid #eeeeee;
+  background: #fafafa;
+  padding: 10px;
+}
+
+.tool-trace article > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 7px;
+}
+
+.tool-trace span,
+.tool-trace em {
+  border-radius: 999px;
+  background: #fff;
+  border: 1px solid #eeeeee;
+  padding: 4px 7px;
+  color: #666;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 900;
+}
+
+.tool-trace strong {
+  flex: 1;
+  font-size: 13px;
+}
+
+.tool-trace p,
+.tool-trace small {
+  display: block;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.tool-trace article.success em {
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.tool-trace article.fallback em,
+.tool-trace article.partial em {
+  background: var(--yellow-soft);
+  color: #8a6200;
+}
+
+.tool-trace article.failed em {
+  background: var(--red-soft);
+  color: var(--red);
+}
+
 .p1-status {
   display: grid;
   grid-template-columns: repeat(3, 1fr);

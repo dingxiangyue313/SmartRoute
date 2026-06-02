@@ -8,7 +8,7 @@
 - Vite
 - 高德 JS API 2.0
 - `@amap/amap-jsapi-loader`
-- 高德 Web 服务：地理编码、周边 POI、路径规划
+- 高德 Web 服务：POI 文本搜索、地理编码、周边 POI、路径规划
 
 后端：
 
@@ -33,7 +33,7 @@
 
 ```text
 User Query
-→ IntentParserAgent
+→ IntentParserAgent (DeepSeek LLM + rules fallback)
 → RouteContext Resolver / AMap Adapter
 → POIRetrieverAgent or AMap POI Search
 → RoutePlannerAgent
@@ -61,9 +61,10 @@ XiaoTuan Query
 模块职责：
 
 - `RouteIntentRouterAgent`：判断小团通用提问是否应该调起 SmartRoute，优先 DeepSeek，失败或无 Key 时规则兜底，输出置信度、触发理由和建议动作。
-- `IntentParserAgent`：解析自然语言中的城市、时间、预算、人数、等待、区域、类别和风格。
+- `IntentParserAgent`：解析自然语言中的城市、时间、预算、人数、等待、区域、类别和风格；配置 DeepSeek Key 后优先用 LLM 输出结构化槽位，无 Key 或失败时规则兜底。
+- `ToolUse Adjustment Chain`：`/api/adjust` 以 ReAct / ToolUse 风格组织 Parse adjustment、Search replacement POI、Validate constraints、Update route、Explain changes，并返回 `tool_trace` 给前端展示。
 - `POIRetrieverAgent`：根据约束和用户画像，从本地索引召回候选 POI。
-- `AMapClient`：使用 `AMAP_WEB_SERVICE_KEY` 调用高德 Web 服务，把“深圳大学/外滩/当前店铺”解析为锚点，召回周边 POI，并补充真实道路 polyline；无 Key 或失败时返回非阻断降级。
+- `AMapClient`：使用 `AMAP_WEB_SERVICE_KEY` 调用高德 Web 服务，优先用 POI 文本搜索把“中山大学/深圳大学/三里屯/外滩/当前店铺”解析为真实锚点，地理编码作为兜底；随后召回周边 POI，并补充真实道路 polyline。无 Key 或失败时返回非阻断降级。
 - `RoutePlannerAgent`：生成紧凑、高分、低等待等路线变体。
 - `UserProfileManager`：读取和写入 SQLite 用户画像，沉淀喜欢/不合适反馈。
 - `route_insight`：生成可信度、约束命中、预算剩余、步行强度、人群适配和风险解释。
@@ -91,7 +92,8 @@ XiaoTuan Query
 - `FollowUp` / `FollowUpOption`：结构化追问卡，选项可直接映射为 `/api/adjust` 指令。
 - `RouteMetrics` / `MetricDeltas`：记录调整前后总时长、人均、等待、交通和站点数变化。
 - `ChangedStop`：记录局部调整替换、重排或新增了哪些站点。
-- `RouteContext`：前端入口上下文，包含 `source`、`city_hint`、`anchor_text`、`anchor_location`、`selected_pois`。
+- `RouteContext`：前端入口上下文，包含 `source`、`city_hint`、`anchor_text`、`anchor_location`、`selected_pois` 和 `transport_strategy`。
+- `AgentTraceStep`：P2 新增，用于展示每一步工具调用的工具名、输入摘要、输出摘要和状态。
 - `POI.source / external_id / distance_from_anchor_meters`：标记 POI 来自高德、入口已选或本地兜底。
 - `Route.map_polyline / transit_segments`：承载高德路径规划或本地估算路径，前端优先按 polyline 绘制。
 
@@ -127,12 +129,13 @@ XiaoTuan Query
 - 输入自然语言 query、user_id、路线数量、`profile_source`、可选 `profile_id`，以及可选 `route_context`。
 - `route_context` 支持搜索/小团的地点锚点、收藏夹已选 POI、POI 详情页当前商户坐标。
 - 返回解析意图、用户画像、画像来源、模拟/脱敏画像上下文、候选 POI、路线方案、生成 trace、规划耗时、画像影响、冲突解释、路线完整性和结构化生成后追问。
+- P2 返回 `tool_trace`，展示 LLM/规则解析、画像构建、POI 搜索、路线规划和高德路径分段。
 
 `POST /api/adjust`
 
 - 输入当前路线、自然语言调整指令、用户画像模式、原始 query。
 - 返回调整后的路线、调整状态、被修改的站点、调整前后指标、指标变化、调整说明、失败放宽建议、冲突解释、规划耗时和下一步追问。
-- 当前为规则版局部调整，覆盖少走路、便宜点、不要排队、加晚餐/咖啡/展览。
+- P2 返回 `tool_trace`，展示 Parse adjustment、Search replacement POI、Validate constraints、Update route、Explain changes；DeepSeek 可参与调整工具选择，无 Key 时规则兜底。
 
 `POST /api/replace`
 
@@ -144,7 +147,7 @@ XiaoTuan Query
 - 输入 route 和 feedback。
 - 将喜欢/不合适写入 SQLite 用户画像。
 
-## 5. P1 状态字段
+## 5. P1 / P2 状态字段
 
 - `planning_time_ms`：规划耗时。
 - `constraint_conflicts`：冲突说明。
@@ -162,8 +165,21 @@ XiaoTuan Query
 - `before_metrics` / `after_metrics` / `metric_deltas`：局部调整前后的指标变化。
 - `changed_stops`：替换、重排或新增的站点说明。
 - `suggested_relaxations`：调整失败或只部分成功时的放宽建议。
+- `parser_source / parser_confidence / parser_reason / llm_slots`：记录需求解析来自 DeepSeek 还是规则兜底。
+- `tool_trace`：P2 Agent Trace，前端用于展示 ReAct / ToolUse 链路。
+- `RouteContext.transport_strategy`：入口或评委即时画像指定的交通策略，例如步行优先、公交/地铁优先、打车优先。
 
-## 6. 与通用大模型的关系
+## 6. P2 即时画像策略
+
+比赛阶段预计无法获得真实美团客户数据，因此 P2 使用“评委即时画像”作为合规替代：
+
+- 前端首次调起 SmartRoute 时弹出轻量偏好选择。
+- 用户选择同行人群、预算区间、排队容忍、移动方式和内容偏好。
+- 前端把选择转为 `judge-session` 脱敏画像，经 `/api/profile/import` 保存为 `manual_import`。
+- 后端按照同一套 `MeituanUserContext` 参与召回和排序，不需要真实账号、cookie 或订单数据。
+- 如果未来拿到官方授权，只替换 `official_api` adapter，不重写规划链路。
+
+## 7. 与通用大模型的关系
 
 DeepSeek、豆包、OpenAI 等通用模型适合做：
 
@@ -183,7 +199,7 @@ DeepSeek、豆包、OpenAI 等通用模型适合做：
 
 因此架构上，大模型应作为 Agent 推理层，SmartRoute 的核心价值在于“LLM + 美团数据 + 搜索/规划工具 + 用户记忆 + 履约闭环”。
 
-## 7. 开发约束
+## 8. 开发约束
 
 - 不在前端硬编码路线结果。
 - 不提交 `web/.env.local`、高德 Key 或其他密钥。
@@ -193,9 +209,9 @@ DeepSeek、豆包、OpenAI 等通用模型适合做：
 - 每条主路线需要强制覆盖餐饮 + 文化/娱乐。
 - 调整路线时必须保留当前路线上下文，避免表现为“重新开始”。
 
-## 8. 当前风险
+## 9. 当前风险
 
-- 当前 `/api/adjust` 是规则版局部调整，还不是 DeepSeek Function Calling / ToolUse。
+- DeepSeek Key 未配置或额度不足时，LLM 解析和工具选择会规则兜底，展示源会标记为 `fallback`。
 - 当前画像支持模拟画像和脱敏手动导入画像，不是真实美团官方账号授权数据。
 - 高德 Web 服务 Key 缺失或域名/额度限制时，会降级为锚点附近本地候选和估算路径；不会让 Demo 白屏。
 - 不允许通过自动登录、抓 cookie 或爬取个人账号方式获取真实画像。

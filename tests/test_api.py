@@ -2,7 +2,8 @@ from fastapi.testclient import TestClient
 
 import api
 from api import app, load_agents
-from core.models import GeoPoint
+from core.agents.intent_parser import IntentParserAgent
+from core.models import GeoPoint, POI, POICategory
 
 
 def test_plan_api_returns_real_routes():
@@ -51,6 +52,8 @@ def test_unknown_poi_prompt_returns_complete_route():
     assert payload["follow_up"]["question"]
     assert len(payload["follow_up"]["options"]) >= 3
     assert payload["follow_up"]["options"][0]["instruction"]
+    assert payload["intent"]["parser_source"] in {"rules", "llm"}
+    assert payload["tool_trace"]
 
 
 def test_shenzhen_anchor_uses_dynamic_location_without_amap_key(monkeypatch):
@@ -78,6 +81,45 @@ def test_shenzhen_anchor_uses_dynamic_location_without_amap_key(monkeypatch):
     assert route["stops"][0]["poi"]["latitude"] < 23
     assert route["stops"][0]["poi"]["longitude"] < 114.5
     assert any("高德 POI" in item for item in payload["trace"])
+
+
+def test_short_xiaotuan_place_query_extracts_anchor_from_planning_phrase(monkeypatch):
+    class FakeAMapClient:
+        enabled = True
+
+        def resolve_anchor(self, text=None, city_hint=None, anchor_location=None):
+            assert text == "万象天地"
+            assert city_hint == "深圳"
+            return api.AMapAnchor(
+                text=text,
+                city="深圳",
+                location=GeoPoint(latitude=22.5408, longitude=113.9462),
+                source="fake_poi_text",
+            )
+
+        def search_pois(self, anchor, categories, keywords=None, radius_meters=3000, limit_per_category=8):
+            return api.fallback_pois_around_anchor(anchor, categories, count_per_category=1)
+
+        def route_segment(self, origin, destination, mode="步行+公交", city=None):
+            return None
+
+    monkeypatch.setattr(api, "AMapClient", FakeAMapClient)
+    client = TestClient(app)
+    response = client.post(
+        "/api/plan",
+        json={
+            "query": "万象天地，帮我规划成一条可执行路线",
+            "user_id": "wanxiang-short-query-test-user",
+            "route_context": {"source": "xiaotuan", "city_hint": "深圳"},
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["intent"]["city"] == "深圳"
+    assert payload["intent"]["extracted_preferences"]["anchor_text"] == "万象天地"
+    assert payload["intent"]["extracted_preferences"]["anchor_source"] == "fake_poi_text"
+    assert all(stop["poi"]["district"] == "深圳" for stop in payload["routes"][0]["route"]["stops"])
 
 
 def test_selected_pois_are_pinned_and_completed():
@@ -186,6 +228,67 @@ def test_amap_route_polyline_is_exposed_when_adapter_returns_segments(monkeypatc
     assert route["transit_segments"][0]["source"] == "amap_direction"
 
 
+def test_transport_strategy_from_route_context_is_used(monkeypatch):
+    monkeypatch.delenv("AMAP_WEB_SERVICE_KEY", raising=False)
+    client = TestClient(app)
+    response = client.post(
+        "/api/plan",
+        json={
+            "query": "深圳大学附近玩3小时，少走路",
+            "user_id": "transport-strategy-test-user",
+            "route_context": {
+                "source": "xiaotuan",
+                "city_hint": "深圳",
+                "anchor_text": "深圳大学",
+                "transport_strategy": "打车优先",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["intent"]["constraints"]["transport_mode"] == "打车优先"
+    assert payload["routes"][0]["route"]["transit_segments"][0]["strategy"] == "打车优先"
+
+
+def test_intent_parser_uses_mocked_llm_when_key_is_configured(monkeypatch):
+    def fake_llm(self, user_input, rules_intent, conversation_history=None, user_profile=None):
+        constraints = rules_intent.constraints.model_copy(update={
+            "city": "深圳",
+            "total_time_hours": 2.5,
+            "transport_mode": "打车优先",
+        })
+        return rules_intent.model_copy(update={
+            "city": "深圳",
+            "constraints": constraints,
+            "parser_source": "llm",
+            "parser_confidence": 0.93,
+            "parser_reason": "mocked DeepSeek parser",
+            "llm_slots": {"anchor_text": "深圳大学", "transport_mode": "打车优先"},
+            "extracted_preferences": {
+                **rules_intent.extracted_preferences,
+                "anchor_text": "深圳大学",
+                "intent_parser_source": "llm",
+            },
+        })
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    monkeypatch.setattr(IntentParserAgent, "_parse_with_llm", fake_llm)
+    load_agents.cache_clear()
+    client = TestClient(app)
+    response = client.post(
+        "/api/plan",
+        json={"query": "深圳大学附近玩两个半小时，打车优先", "user_id": "mock-llm-parser-user"},
+    )
+    load_agents.cache_clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["intent"]["parser_source"] == "llm"
+    assert payload["intent"]["parser_confidence"] == 0.93
+    assert payload["intent"]["constraints"]["transport_mode"] == "打车优先"
+
+
 def test_profile_modes_change_route_context_or_result():
     client = TestClient(app)
     query = "我下午要去外滩玩3个小时，帮我规划一个路线"
@@ -263,6 +366,45 @@ def test_profile_sources_and_manual_import_drive_plan(tmp_path, monkeypatch):
     assert manual_plan["profile_influence"] != preset_plan["profile_influence"]
 
 
+def test_judge_session_profile_is_labeled_as_instant_profile(tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "PROFILE_IMPORTS_PATH", tmp_path / "profile_imports.json")
+    client = TestClient(app)
+    import_response = client.post(
+        "/api/profile/import",
+        json={
+            "profile_id": "judge-session",
+            "display_name": "评委即时画像",
+            "recent_searches": ["深圳大学", "展览文化", "带爸妈"],
+            "favorite_pois": ["深圳大学附近展览文化"],
+            "browsed_pois": ["少走路", "尽量不排队"],
+            "favorite_categories": ["景点", "咖啡/茶饮"],
+            "favorite_districts": ["深圳"],
+            "frequent_districts": ["深圳"],
+            "budget_preference": 260,
+            "max_wait_preference": 8,
+            "walk_preference": "少走路",
+            "coupon_sensitive": False,
+        },
+    )
+
+    assert import_response.status_code == 200
+    assert "评委即时画像" in import_response.json()["profile"]["summary"]
+
+    plan_response = client.post(
+        "/api/plan",
+        json={
+            "query": "深圳大学附近玩3小时",
+            "user_id": "judge-session-user",
+            "profile_source": "manual_import",
+            "profile_id": "judge-session",
+            "route_context": {"source": "xiaotuan", "city_hint": "深圳", "anchor_text": "深圳大学"},
+        },
+    )
+    payload = plan_response.json()
+    assert payload["profile_id"] == "judge-session"
+    assert "评委即时画像" in payload["profile_source_description"]
+
+
 def test_profile_import_rejects_sensitive_fields(tmp_path, monkeypatch):
     monkeypatch.setattr(api, "PROFILE_IMPORTS_PATH", tmp_path / "profile_imports.json")
     client = TestClient(app)
@@ -312,6 +454,8 @@ def test_adjust_api_updates_route_with_explanation():
     assert payload["follow_up"]["options"]
     assert payload["planning_time_ms"] >= 0
     assert payload["route_completeness"]["is_complete"] is True
+    assert payload["tool_trace"]
+    assert [step["tool"] for step in payload["tool_trace"]][:2] == ["ParseAdjustment", "SearchReplacementPOI"]
 
 
 def test_adjust_api_does_not_fake_improvement_when_no_better_option():
@@ -405,3 +549,145 @@ def test_replace_api_returns_same_category_options():
     options = replace_response.json()["options"]
     assert options
     assert options[0]["poi"]["category"] == first_stop["poi"]["category"]
+
+
+def test_replace_api_uses_current_stop_location_for_dynamic_options(monkeypatch):
+    class FakeAMapClient:
+        enabled = True
+
+        def resolve_anchor(self, text=None, city_hint=None, anchor_location=None):
+            assert anchor_location is not None
+            assert anchor_location.latitude < 23
+            assert 113 < anchor_location.longitude < 115
+            return api.AMapAnchor(
+                text=text or "原石牛扒(中心书城店)",
+                city=city_hint or "深圳",
+                location=anchor_location,
+                source="context_location",
+            )
+
+        def search_pois(self, anchor, categories, keywords=None, radius_meters=3000, limit_per_category=8):
+            assert anchor.city in {"深圳", "福田区", "深圳市"}
+            return [
+                POI(
+                    id="amap-shenzhen-steak-replace",
+                    name="深圳同类牛扒替换店",
+                    category=POICategory.RESTAURANT,
+                    address="深圳市福田区中心书城附近",
+                    district="福田区",
+                    latitude=22.545,
+                    longitude=114.061,
+                    rating=4.6,
+                    review_count=320,
+                    price_per_person=108,
+                    avg_wait_minutes=6,
+                    business_hours={"open": "10:30", "close": "22:00"},
+                    tags=["餐饮", "牛扒", "高德POI"],
+                    ugc_summary="深圳当前站点附近同类替换。",
+                    visit_duration_minutes=60,
+                    source="amap",
+                    external_id="fake-shenzhen-steak",
+                    distance_from_anchor_meters=360,
+                )
+            ]
+
+    monkeypatch.setattr(api, "AMapClient", FakeAMapClient)
+    client = TestClient(app)
+    route = {
+        "id": "replace-location-test-route",
+        "title": "福田文艺紧凑不绕路",
+        "description": "深圳路线",
+        "stops": [
+            {
+                "order": 1,
+                "poi": {
+                    "id": "amap-current-steak",
+                    "name": "原石牛扒(中心书城店)",
+                    "category": "餐饮",
+                    "address": "深圳市福田区中心书城",
+                    "district": "福田区",
+                    "latitude": 22.5431,
+                    "longitude": 114.0596,
+                    "rating": 4.5,
+                    "review_count": 500,
+                    "price_per_person": 120,
+                    "avg_wait_minutes": 8,
+                    "business_hours": {"open": "10:30", "close": "22:00"},
+                    "tags": ["餐饮", "高德POI"],
+                    "ugc_summary": "当前深圳站点",
+                    "visit_duration_minutes": 60,
+                    "source": "amap",
+                    "external_id": "fake-current-steak",
+                    "distance_from_anchor_meters": 0,
+                },
+                "arrival_time": "14:00",
+                "departure_time": "15:08",
+                "duration_minutes": 60,
+                "wait_minutes": 8,
+                "transit_to_next": "步行约 6 分钟",
+                "transit_minutes": 6,
+                "transit_polyline": [],
+                "tips": "",
+            },
+            {
+                "order": 2,
+                "poi": {
+                    "id": "amap-shenzhen-culture",
+                    "name": "深圳中心书城",
+                    "category": "景点",
+                    "address": "深圳市福田区",
+                    "district": "福田区",
+                    "latitude": 22.5419,
+                    "longitude": 114.0601,
+                    "rating": 4.6,
+                    "review_count": 800,
+                    "price_per_person": 0,
+                    "avg_wait_minutes": 3,
+                    "business_hours": {"open": "10:00", "close": "22:00"},
+                    "tags": ["景点"],
+                    "ugc_summary": "当前路线文化站",
+                    "visit_duration_minutes": 60,
+                    "source": "amap",
+                },
+                "arrival_time": "15:14",
+                "departure_time": "16:22",
+                "duration_minutes": 60,
+                "wait_minutes": 3,
+                "transit_to_next": None,
+                "transit_minutes": None,
+                "transit_polyline": [],
+                "tips": "",
+            },
+        ],
+        "total_time_minutes": 142,
+        "total_cost_per_person": 120,
+        "total_wait_minutes": 11,
+        "total_transit_minutes": 6,
+        "map_polyline": [],
+        "transit_segments": [],
+        "highlights": [],
+        "warnings": [],
+    }
+
+    response = client.post(
+        "/api/replace",
+        json={
+            "query": "我下午要去深圳福田中心书城附近玩3个小时",
+            "route": route,
+            "stop_order": 1,
+            "user_id": "replace-location-test-user",
+            "route_context": {
+                "source": "replace",
+                "city_hint": "深圳",
+                "anchor_text": "原石牛扒(中心书城店)",
+                "anchor_location": {"latitude": 22.5431, "longitude": 114.0596},
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    options = response.json()["options"]
+    assert options
+    assert options[0]["poi"]["name"] == "深圳同类牛扒替换店"
+    assert options[0]["poi"]["district"] == "福田区"
+    assert options[0]["poi"]["source"] == "amap"

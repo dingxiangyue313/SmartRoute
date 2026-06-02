@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -11,6 +12,7 @@ from typing import Any, Literal
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
+from openai import OpenAI
 from pydantic import BaseModel, ConfigDict, Field
 
 from core.agents.intent_parser import IntentParserAgent
@@ -138,6 +140,14 @@ class ChangedStop(BaseModel):
     explanation: str
 
 
+class AgentTraceStep(BaseModel):
+    step: str
+    tool: str
+    input: str
+    output: str
+    status: Literal["success", "partial", "fallback", "failed"] = "success"
+
+
 class RouteView(BaseModel):
     route: Route
     insight: RouteInsight
@@ -163,6 +173,7 @@ class PlanResponse(BaseModel):
     profile_influence: list[ProfileInfluence] = Field(default_factory=list)
     constraint_conflicts: list[str] = Field(default_factory=list)
     route_completeness: RouteCompleteness | None = None
+    tool_trace: list[AgentTraceStep] = Field(default_factory=list)
 
 
 class FeedbackRequest(BaseModel):
@@ -176,6 +187,10 @@ class ReplaceRequest(BaseModel):
     route: Route
     stop_order: int = Field(ge=1)
     user_id: str = "demo-user"
+    profile_mode: str = "文艺体验型"
+    profile_source: Literal["preset", "manual_import", "official_api"] = "preset"
+    profile_id: str | None = None
+    route_context: RouteContext | None = None
 
 
 class ReplacementOption(BaseModel):
@@ -202,6 +217,7 @@ class AdjustRequest(BaseModel):
     profile_mode: str = "文艺体验型"
     profile_source: Literal["preset", "manual_import", "official_api"] = "preset"
     profile_id: str | None = None
+    route_context: RouteContext | None = None
 
 
 class AdjustResponse(BaseModel):
@@ -220,6 +236,7 @@ class AdjustResponse(BaseModel):
     follow_up: FollowUp | None = None
     constraint_conflicts: list[str] = Field(default_factory=list)
     route_completeness: RouteCompleteness
+    tool_trace: list[AgentTraceStep] = Field(default_factory=list)
 
 
 class ManualProfileImportRequest(BaseModel):
@@ -507,11 +524,12 @@ def save_imported_profile_record(record: dict[str, Any]) -> None:
 def imported_profile_view(record: dict[str, Any]) -> ImportedProfileView:
     display_name = str(record.get("display_name") or "脱敏画像")
     count = profile_signal_count(record)
+    prefix = "评委即时画像" if str(record.get("profile_id", "")).startswith("judge-session") else "脱敏导入"
     return ImportedProfileView(
         profile_id=str(record.get("profile_id") or safe_slug(display_name)),
         display_name=display_name,
         signal_count=count,
-        summary=f"脱敏导入 · {display_name} · {count} 个信号",
+        summary=f"{prefix} · {display_name} · {count} 个信号",
         created_at=record.get("created_at"),
     )
 
@@ -537,8 +555,9 @@ def imported_record_to_context(record: dict[str, Any]) -> MeituanUserContext:
         frequent_districts = favorite_districts or ["黄浦区"]
 
     signal_count = profile_signal_count(record)
+    source_label = "评委即时画像" if str(record.get("profile_id", "")).startswith("judge-session") else "脱敏导入"
     summary = (
-        f"脱敏导入 · {display_name}：基于 {len(recent_searches)} 条搜索、"
+        f"{source_label} · {display_name}：基于 {len(recent_searches)} 条偏好、"
         f"{len(favorite_pois)} 个收藏、{len(browsed_pois)} 个浏览信号生成，"
         "不含账号、手机号、cookie 或订单信息。"
     )
@@ -619,7 +638,8 @@ def resolve_profile_context(
         if record:
             context = imported_record_to_context(record)
             view = imported_profile_view(record)
-            return context, "manual_import", view.profile_id, f"脱敏导入 · {view.display_name} · {view.signal_count} 个信号", view.signal_count
+            source_label = "评委即时画像" if view.profile_id.startswith("judge-session") else "脱敏导入"
+            return context, "manual_import", view.profile_id, f"{source_label} · {view.display_name} · {view.signal_count} 个信号", view.signal_count
     context = build_meituan_context(profile_mode)
     return context, "preset", None, f"模拟画像 · {context.profile_mode}", profile_signal_count(PROFILE_CONTEXTS[context.profile_mode])
 
@@ -639,14 +659,21 @@ def profile_with_context(profile: UserProfile, context: MeituanUserContext) -> U
     return merged
 
 
-def intent_with_context(intent: ParsedIntent, context: MeituanUserContext) -> ParsedIntent:
+def intent_with_context(
+    intent: ParsedIntent,
+    context: MeituanUserContext,
+    route_context: RouteContext | None = None,
+) -> ParsedIntent:
     next_intent = intent.model_copy(deep=True)
     constraints = next_intent.constraints
     constraints.max_wait_minutes = min(constraints.max_wait_minutes, context.max_wait_preference)
     constraints.budget_per_person = constraints.budget_per_person or context.common_budget
+    if route_context and route_context.transport_strategy:
+        constraints.transport_mode = route_context.transport_strategy
     if context.walk_preference == "少走路":
         constraints.max_walk_minutes = min(constraints.max_walk_minutes, 10)
-        constraints.transport_mode = "短步行+打车"
+        if not (route_context and route_context.transport_strategy):
+            constraints.transport_mode = "短步行+打车"
     if not constraints.preferred_districts:
         constraints.preferred_districts = context.frequent_districts[:2]
 
@@ -671,31 +698,96 @@ def extract_anchor_text(query: str, route_context: RouteContext | None = None) -
     if route_context and route_context.anchor_text:
         return route_context.anchor_text.strip()
     text = query.strip()
-    known_names = ["深圳大学", "深大", "金地威新中心", "gaga", "科技园", "深圳湾", "外滩", "南京东路", "陆家嘴", "静安寺"]
+    known_names = [
+        "深圳万象天地",
+        "万象天地",
+        "深圳大学",
+        "深大",
+        "金地威新中心",
+        "gaga",
+        "科技园",
+        "深圳湾",
+        "外滩",
+        "南京东路",
+        "陆家嘴",
+        "静安寺",
+    ]
     for name in known_names:
         if name in text:
-            return name
+            return "万象天地" if name == "深圳万象天地" else name
     for marker in ["附近", "周边"]:
         if marker in text:
             prefix = text.split(marker, 1)[0]
-            candidate = prefix[-12:].strip("，。,. 　")
+            candidate = clean_anchor_candidate(prefix[-18:])
             if len(candidate) >= 2:
                 return candidate
+    for marker in ["，", ",", "。", "帮我", "给我", "规划", "安排", "路线"]:
+        if marker in text:
+            candidate = clean_anchor_candidate(text.split(marker, 1)[0])
+            if is_likely_place_anchor(candidate):
+                return candidate
     if "从" in text and "出发" in text:
-        candidate = text.split("从", 1)[1].split("出发", 1)[0].strip("，。,. 　")
+        candidate = clean_anchor_candidate(text.split("从", 1)[1].split("出发", 1)[0])
         if len(candidate) >= 2:
             return candidate[:24]
     return None
 
 
+def clean_anchor_candidate(value: str) -> str:
+    text = value.strip("，。,. 　")
+    prefixes = ["我要去", "我想去", "想去", "要去", "我去", "去", "到", "在", "我要", "我想", "想", "要"]
+    changed = True
+    while changed:
+        changed = False
+        for prefix in prefixes:
+            if text.startswith(prefix) and len(text) > len(prefix) + 1:
+                text = text[len(prefix):].strip("，。,. 　")
+                changed = True
+    return text[:24]
+
+
+def is_likely_place_anchor(value: str) -> bool:
+    text = value.strip()
+    if not (2 <= len(text) <= 24):
+        return False
+    if any(word in text for word in ["什么", "怎么", "多少", "附近", "周边", "今天", "下午", "晚上", "小时"]):
+        return False
+    suffixes = [
+        "天地",
+        "中心",
+        "广场",
+        "商场",
+        "公园",
+        "大学",
+        "学院",
+        "书城",
+        "博物馆",
+        "美术馆",
+        "艺术馆",
+        "景区",
+        "古镇",
+        "步行街",
+        "购物中心",
+        "城",
+        "店",
+    ]
+    return any(text.endswith(suffix) for suffix in suffixes)
+
+
 def city_hint_from(query: str, intent: ParsedIntent, route_context: RouteContext | None = None) -> str:
     if route_context and route_context.city_hint:
         return normalize_city_hint(route_context.city_hint) or route_context.city_hint
-    if intent.city:
-        return intent.city
     if any(word in query for word in ["深圳", "深大", "深圳大学", "科技园", "南山"]):
         return "深圳"
-    return "上海"
+    if any(word in query for word in ["上海", "外滩", "陆家嘴", "南京东路", "静安寺", "豫园"]):
+        return "上海"
+    if any(word in query for word in ["北京", "三里屯", "朝阳", "国贸"]):
+        return "北京"
+    if any(word in query for word in ["广州", "天河", "珠江新城"]):
+        return "广州"
+    if intent.city and intent.parser_source == "llm":
+        return intent.city
+    return ""
 
 
 def context_poi_to_poi(
@@ -800,7 +892,9 @@ def build_dynamic_candidates(
     if not anchor:
         return [], selected_pois, None, trace_notes
 
-    intent.constraints.city = anchor.city if anchor.city != "未知城市" else city_hint
+    resolved_city = anchor.city if anchor.city != "未知城市" else city_hint
+    intent.city = resolved_city or intent.city
+    intent.constraints.city = resolved_city
     if anchor.city and anchor.city not in intent.constraints.preferred_districts:
         if not intent.constraints.preferred_districts:
             intent.constraints.preferred_districts = [anchor.city]
@@ -843,13 +937,23 @@ def enrich_route_with_amap_segments(route: Route, amap_client: AMapClient, trans
 
     for index, stop in enumerate(route.stops[:-1]):
         next_stop = route.stops[index + 1]
-        segment = amap_client.route_segment(stop.poi, next_stop.poi, transport_mode) if amap_client.enabled else None
+        segment = None
+        if amap_client.enabled:
+            try:
+                segment = amap_client.route_segment(
+                    stop.poi,
+                    next_stop.poi,
+                    transport_mode,
+                    city=normalize_city_hint(stop.poi.district) or normalize_city_hint(next_stop.poi.district),
+                )
+            except TypeError:
+                segment = amap_client.route_segment(stop.poi, next_stop.poi, transport_mode)
         if segment:
             used_amap = True
             minutes_value = segment.duration_minutes
             polyline = segment.polyline
             distance_km = segment.distance_meters / 1000
-            method = "打车" if segment.mode == "driving" else "步行"
+            method = {"driving": "打车/驾车", "transit": "公交/地铁", "walking": "步行"}.get(segment.mode, "移动")
             stop.transit_to_next = f"高德{method}约 {minutes_value} 分钟，距离约 {distance_km:.1f} km"
             stop.transit_minutes = minutes_value
             stop.transit_polyline = polyline
@@ -860,6 +964,8 @@ def enrich_route_with_amap_segments(route: Route, amap_client: AMapClient, trans
                     "from_poi_id": stop.poi.id,
                     "to_poi_id": next_stop.poi.id,
                     "mode": segment.mode,
+                    "mode_label": method,
+                    "strategy": transport_mode,
                     "distance_meters": segment.distance_meters,
                     "duration_minutes": minutes_value,
                     "source": segment.source,
@@ -884,9 +990,12 @@ def enrich_route_with_amap_segments(route: Route, amap_client: AMapClient, trans
                     "from_poi_id": stop.poi.id,
                     "to_poi_id": next_stop.poi.id,
                     "mode": "fallback",
+                    "mode_label": transport_mode or "本地估算",
+                    "strategy": transport_mode,
                     "distance_meters": round(haversine_km(stop.poi.latitude, stop.poi.longitude, next_stop.poi.latitude, next_stop.poi.longitude) * 1000),
                     "duration_minutes": minutes_value,
                     "source": "local_estimate",
+                    "fallback_reason": "未配置高德 Web 服务 Key或该策略路径规划失败",
                     "polyline": polyline,
                 }
             )
@@ -900,7 +1009,7 @@ def enrich_route_with_amap_segments(route: Route, amap_client: AMapClient, trans
     route.map_polyline = full_polyline
     route.transit_segments = segments
     if used_amap:
-        route.highlights = list(dict.fromkeys(["已接入高德真实路径耗时与道路 polyline", *route.highlights]))[:4]
+        route.highlights = list(dict.fromkeys([f"已接入高德{transport_mode}路径耗时与道路 polyline", *route.highlights]))[:4]
     return route
 
 
@@ -1415,6 +1524,180 @@ def adjustment_summary(
     return f"已根据“{instruction}”加入或替换为 {target}，保持路线仍可执行。"
 
 
+def trace_step(step: str, tool: str, input_text: str, output: str, status: str = "success") -> AgentTraceStep:
+    normalized = status if status in {"success", "partial", "fallback", "failed"} else "success"
+    return AgentTraceStep(
+        step=step,
+        tool=tool,
+        input=input_text[:180],
+        output=output[:220],
+        status=normalized,  # type: ignore[arg-type]
+    )
+
+
+def build_plan_tool_trace(
+    intent: ParsedIntent,
+    candidates: list[tuple[POI, float]],
+    routes: list[Route],
+    context: MeituanUserContext,
+    anchor: AMapAnchor | None,
+    amap_client: AMapClient,
+) -> list[AgentTraceStep]:
+    first_route = routes[0] if routes else None
+    amap_segments = sum(
+        1
+        for segment in (first_route.transit_segments if first_route else [])
+        if str(segment.get("source", "")).startswith("amap")
+    )
+    return [
+        trace_step(
+            "1",
+            "ParseIntent",
+            intent.extracted_preferences.get("raw_query", ""),
+            f"{intent.parser_source} · {intent.parser_reason} · 置信度 {intent.parser_confidence:.2f}",
+            "success" if intent.parser_source == "llm" else "fallback",
+        ),
+        trace_step(
+            "2",
+            "BuildSessionProfile",
+            context.profile_mode,
+            f"{context.summary}；交通偏好 {context.walk_preference}，排队≤{context.max_wait_preference}分钟",
+        ),
+        trace_step(
+            "3",
+            "SearchPOI",
+            anchor.text if anchor else "本地索引",
+            f"{'高德/锚点' if anchor else '本地RAG'}候选 {len(candidates)} 个",
+            "success" if candidates else "failed",
+        ),
+        trace_step(
+            "4",
+            "PlanRoute",
+            intent.constraints.transport_mode,
+            f"生成 {len(routes)} 条路线，主路线 {len(first_route.stops) if first_route else 0} 个 POI",
+            "success" if first_route else "failed",
+        ),
+        trace_step(
+            "5",
+            "MapDirections",
+            "AMAP_WEB_SERVICE_KEY",
+            (
+                f"高德分段 {amap_segments} 段，策略 {intent.constraints.transport_mode}"
+                if amap_client.enabled
+                else "未配置高德 Web 服务 Key，使用本地估算路径"
+            ),
+            "success" if amap_segments else "fallback",
+        ),
+    ]
+
+
+def classify_adjustment_with_deepseek(
+    instruction: str,
+    route: Route,
+) -> tuple[str, set[POICategory] | None, str, str] | None:
+    api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+    if not api_key:
+        return None
+    model = os.getenv("DEEPSEEK_CHAT_MODEL", "deepseek-chat").strip() or "deepseek-chat"
+    base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip()
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "optimize_wait",
+                "description": "减少排队/等位时间",
+                "parameters": {"type": "object", "properties": {"reason": {"type": "string"}}},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "optimize_budget",
+                "description": "降低人均预算或提高性价比",
+                "parameters": {"type": "object", "properties": {"reason": {"type": "string"}}},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "optimize_walk",
+                "description": "减少步行/移动强度",
+                "parameters": {"type": "object", "properties": {"reason": {"type": "string"}}},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "add_category",
+                "description": "加入咖啡、餐饮、展览、娱乐等类型 POI",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "category": {"type": "string", "enum": ["餐饮", "咖啡/茶饮", "景点", "娱乐"]},
+                        "reason": {"type": "string"},
+                    },
+                },
+            },
+        },
+    ]
+    try:
+        client = OpenAI(api_key=api_key, base_url=base_url, timeout=5.0)
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "你是 SmartRoute 的调整工具选择器。根据用户调整指令选择最合适的一个工具。",
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "instruction": instruction,
+                            "current_route": [
+                                {
+                                    "name": stop.poi.name,
+                                    "category": stop.poi.category.value,
+                                    "wait": stop.wait_minutes,
+                                    "price": stop.poi.price_per_person,
+                                    "transit": stop.transit_minutes,
+                                }
+                                for stop in route.stops
+                            ],
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            ],
+            tools=tools,
+            tool_choice="auto",
+            temperature=0,
+        )
+        message = response.choices[0].message
+        tool_calls = message.tool_calls or []
+        if not tool_calls:
+            return None
+        call = tool_calls[0]
+        name = call.function.name
+        args = json.loads(call.function.arguments or "{}")
+        reason = str(args.get("reason") or "DeepSeek ToolUse 选择调整工具")
+        if name == "optimize_wait":
+            return "wait", None, "llm_tool", reason
+        if name == "optimize_budget":
+            return "cheaper", None, "llm_tool", reason
+        if name == "optimize_walk":
+            return "walk", None, "llm_tool", reason
+        if name == "add_category":
+            category_text = str(args.get("category") or "景点")
+            try:
+                return "add", {POICategory(category_text)}, "llm_tool", reason
+            except ValueError:
+                return "add", {POICategory.ATTRACTION}, "llm_tool", reason
+    except Exception:
+        return None
+    return None
+
+
 def build_trace(
     intent: ParsedIntent,
     candidates: list[tuple[POI, float]],
@@ -1456,6 +1739,7 @@ def health() -> dict[str, Any]:
         "poi_count": len(load_poi_database()),
         "index_count": agents.poi_retriever.vector_store.count,
         "amap_web_service": "configured" if amap_client.enabled else "missing",
+        "deepseek": "configured" if os.getenv("DEEPSEEK_API_KEY", "").strip() else "rules_fallback",
     }
 
 
@@ -1549,7 +1833,7 @@ def plan_route(request: PlanRequest) -> PlanResponse:
     )
     profile = agents.profile_manager.get_profile(request.user_id)
     intent = agents.intent_parser.parse(request.query, user_profile=profile.model_dump())
-    intent = intent_with_context(intent, meituan_context)
+    intent = intent_with_context(intent, meituan_context, request.route_context)
     agents.profile_manager.infer_profile_from_chat(request.user_id, intent.extracted_preferences)
     profile = profile_with_context(agents.profile_manager.get_profile(request.user_id), meituan_context)
     dynamic_candidates, pinned_pois, anchor, context_trace = build_dynamic_candidates(
@@ -1606,6 +1890,7 @@ def plan_route(request: PlanRequest) -> PlanResponse:
         profile_influence=build_profile_influence(meituan_context, selected_route),
         constraint_conflicts=conflicts,
         route_completeness=build_route_completeness(selected_route),
+        tool_trace=build_plan_tool_trace(intent, candidates, routes, meituan_context, anchor, amap_client),
     )
 
 
@@ -1613,6 +1898,7 @@ def plan_route(request: PlanRequest) -> PlanResponse:
 def adjust_route(request: AdjustRequest) -> AdjustResponse:
     started = time.perf_counter()
     agents = load_agents()
+    amap_client = AMapClient()
     meituan_context, _, _, _, _ = resolve_profile_context(
         request.profile_source,
         request.profile_mode,
@@ -1620,11 +1906,32 @@ def adjust_route(request: AdjustRequest) -> AdjustResponse:
     )
     profile = profile_with_context(agents.profile_manager.get_profile(request.user_id), meituan_context)
     intent = agents.intent_parser.parse(f"{request.query}。调整要求：{request.instruction}", user_profile=profile.model_dump())
-    intent = intent_with_context(intent, meituan_context)
-    candidates = agents.poi_retriever.retrieve(intent, user_profile=profile, max_candidates=60)
+    intent = intent_with_context(intent, meituan_context, request.route_context)
+    pseudo_plan_request = PlanRequest(
+        query=request.query,
+        user_id=request.user_id,
+        n_routes=1,
+        profile_mode=request.profile_mode,
+        profile_source=request.profile_source,
+        profile_id=request.profile_id,
+        route_context=request.route_context,
+    )
+    dynamic_candidates, _, anchor, context_trace = build_dynamic_candidates(
+        pseudo_plan_request,
+        intent,
+        meituan_context,
+        amap_client,
+    )
+    candidates = dynamic_candidates or agents.poi_retriever.retrieve(intent, user_profile=profile, max_candidates=60)
     candidates = apply_context_to_candidates(candidates, meituan_context)
 
-    kind, categories = detect_adjustment_kind(request.instruction)
+    llm_adjustment = classify_adjustment_with_deepseek(request.instruction, request.route)
+    if llm_adjustment:
+        kind, categories, adjustment_source, adjustment_reason = llm_adjustment
+    else:
+        kind, categories = detect_adjustment_kind(request.instruction)
+        adjustment_source = "rules"
+        adjustment_reason = "规则兜底识别调整目标"
     target_index = choose_adjustment_target(request.route, kind)
     candidate = find_adjustment_candidate(request.route, candidates, kind, target_index, categories)
     before_metrics = route_metrics(request.route)
@@ -1646,6 +1953,8 @@ def adjust_route(request: AdjustRequest) -> AdjustResponse:
     adjusted_route = None
     if should_rebuild_route:
         adjusted_route = agents.route_planner.build_route_from_pois(intent, next_pois, "实时调整")
+        if adjusted_route is not None:
+            adjusted_route = enrich_route_with_amap_segments(adjusted_route, amap_client, intent.constraints.transport_mode)
     if adjusted_route is None:
         route_build_failed = should_rebuild_route
         adjusted_route = request.route.model_copy(deep=True)
@@ -1679,6 +1988,46 @@ def adjust_route(request: AdjustRequest) -> AdjustResponse:
     conflicts = build_constraint_conflicts(adjusted_route, intent)
     follow_up = build_follow_up(route_view, intent, conflicts, meituan_context)
     planning_time_ms = int((time.perf_counter() - started) * 1000)
+    search_source = "高德/锚点候选" if dynamic_candidates else "本地RAG候选"
+    tool_trace = [
+        trace_step(
+            "1",
+            "ParseAdjustment",
+            request.instruction,
+            f"{adjustment_source} · {adjustment_reason} · kind={kind}",
+            "success" if adjustment_source == "llm_tool" else "fallback",
+        ),
+        trace_step(
+            "2",
+            "SearchReplacementPOI",
+            search_source,
+            f"候选 {len(candidates)} 个；命中 {candidate.name if candidate else '无更优替换项'}",
+            "success" if candidate else "partial",
+        ),
+        trace_step(
+            "3",
+            "ValidateConstraints",
+            f"目标第 {target_index + 1} 站",
+            "；".join(conflicts) if conflicts else "路线完整性和主要约束可接受",
+            "partial" if conflicts else "success",
+        ),
+        trace_step(
+            "4",
+            "UpdateRoute",
+            intent.constraints.transport_mode,
+            summary,
+            "success" if status == "applied" else "partial" if status == "partial" else "failed",
+        ),
+        trace_step(
+            "5",
+            "ExplainChanges",
+            "metrics",
+            f"等位 {deltas.total_wait_minutes:+} 分钟，人均 {deltas.total_cost_per_person:+.0f} 元，移动 {deltas.total_transit_minutes:+} 分钟",
+            "success",
+        ),
+    ]
+    if context_trace:
+        tool_trace.insert(2, trace_step("2b", "ContextPOISearch", anchor.text if anchor else "无锚点", "；".join(context_trace), "success"))
     return AdjustResponse(
         route=route_view,
         adjustment_summary=summary,
@@ -1701,6 +2050,7 @@ def adjust_route(request: AdjustRequest) -> AdjustResponse:
             is_complete=False,
             notes=["调整失败"],
         ),
+        tool_trace=tool_trace,
     )
 
 
@@ -1722,12 +2072,54 @@ def replace_poi(request: ReplaceRequest) -> ReplaceResponse:
     if request.stop_order > len(request.route.stops):
         raise HTTPException(status_code=404, detail="stop_order 超出当前路线范围")
 
-    profile = agents.profile_manager.get_profile(request.user_id)
-    intent = agents.intent_parser.parse(request.query, user_profile=profile.model_dump())
-    candidates = agents.poi_retriever.retrieve(intent, user_profile=profile, max_candidates=40)
     current_stop = request.route.stops[request.stop_order - 1]
     current_ids = {stop.poi.id for stop in request.route.stops}
     previous_poi = request.route.stops[request.stop_order - 2].poi if request.stop_order > 1 else None
+    amap_client = AMapClient()
+    meituan_context, _, _, _, _ = resolve_profile_context(
+        request.profile_source,
+        request.profile_mode,
+        request.profile_id,
+    )
+    profile = profile_with_context(agents.profile_manager.get_profile(request.user_id), meituan_context)
+    intent = agents.intent_parser.parse(request.query, user_profile=profile.model_dump())
+
+    inferred_context = request.route_context or RouteContext(
+        source="replace",
+        city_hint=normalize_city_hint(current_stop.poi.district) or current_stop.poi.district,
+        anchor_text=current_stop.poi.name,
+        anchor_location=GeoPoint(latitude=current_stop.poi.latitude, longitude=current_stop.poi.longitude),
+    )
+    replace_context = inferred_context.model_copy(
+        update={
+            "anchor_location": inferred_context.anchor_location or GeoPoint(
+                latitude=current_stop.poi.latitude,
+                longitude=current_stop.poi.longitude,
+            ),
+            "anchor_text": inferred_context.anchor_text or current_stop.poi.name,
+            "city_hint": inferred_context.city_hint or normalize_city_hint(current_stop.poi.district) or current_stop.poi.district,
+        }
+    )
+    intent.constraints.preferred_categories = [current_stop.poi.category]
+    intent = intent_with_context(intent, meituan_context, replace_context)
+    pseudo_plan_request = PlanRequest(
+        query=request.query,
+        user_id=request.user_id,
+        n_routes=1,
+        profile_mode=request.profile_mode,
+        profile_source=request.profile_source,
+        profile_id=request.profile_id,
+        route_context=replace_context,
+    )
+    dynamic_candidates, _, _, _ = build_dynamic_candidates(
+        pseudo_plan_request,
+        intent,
+        meituan_context,
+        amap_client,
+    )
+    fallback_candidates = agents.poi_retriever.retrieve(intent, user_profile=profile, max_candidates=40)
+    candidates = dynamic_candidates or fallback_candidates
+    candidates = apply_context_to_candidates(candidates, meituan_context)
 
     options: list[ReplacementOption] = []
     for poi, score in candidates:
@@ -1736,6 +2128,8 @@ def replace_poi(request: ReplaceRequest) -> ReplaceResponse:
         distance = None
         if previous_poi:
             distance = haversine_km(previous_poi.latitude, previous_poi.longitude, poi.latitude, poi.longitude)
+            if poi.source != "amap" and distance > 12:
+                continue
         cost_delta = round(poi.price_per_person - current_stop.poi.price_per_person, 1)
         wait_delta = poi.avg_wait_minutes - current_stop.wait_minutes
         duration_delta = poi.visit_duration_minutes - current_stop.duration_minutes

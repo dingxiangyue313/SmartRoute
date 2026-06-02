@@ -1,12 +1,13 @@
 import AMapLoader from "@amap/amap-jsapi-loader";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
-const API_BASE = import.meta.env.VITE_API_BASE === undefined ? "http://127.0.0.1:8000" : import.meta.env.VITE_API_BASE;
+const API_BASE = import.meta.env.VITE_API_BASE ?? (import.meta.env.PROD ? "" : "http://127.0.0.1:8000");
 const AMAP_KEY = import.meta.env.VITE_AMAP_KEY || "";
 const AMAP_SECURITY_JS_CODE = import.meta.env.VITE_AMAP_SECURITY_JS_CODE || "";
 const DEFAULT_MAP_CENTER = [113.93646, 22.53332];
 const USER_ID = "product-demo-user";
 const DEFAULT_QUERY = "我下午要去深圳大学附近玩3个小时，帮我规划一个路线";
+const APP_CURRENT_CITY = "深圳";
 const PROFILE_MODES = ["低排队务实型", "文艺体验型", "带爸妈轻松型"];
 const FAVORITE_POIS = [
   {
@@ -97,6 +98,42 @@ const IMPORT_PROFILE_TEMPLATE = JSON.stringify({
   coupon_sensitive: false,
 }, null, 2);
 
+const JUDGE_PROFILE_QUESTIONS = [
+  {
+    key: "companion",
+    title: "同行人群",
+    options: ["朋友", "情侣", "带爸妈", "亲子"],
+  },
+  {
+    key: "budget",
+    title: "预算区间",
+    options: ["省钱优先", "中等预算", "体验优先"],
+  },
+  {
+    key: "queue",
+    title: "排队容忍",
+    options: ["尽量不排队", "可等15分钟", "热门也可以"],
+  },
+  {
+    key: "mobility",
+    title: "移动方式",
+    options: ["少走路", "步行可接受", "公交地铁", "打车优先"],
+  },
+  {
+    key: "content",
+    title: "内容偏好",
+    options: ["咖啡/茶饮", "展览文化", "本地美食", "娱乐玩乐", "商场室内"],
+  },
+];
+
+const DEFAULT_JUDGE_ANSWERS = {
+  companion: "朋友",
+  budget: "中等预算",
+  queue: "可等15分钟",
+  mobility: "步行可接受",
+  content: "咖啡/茶饮",
+};
+
 const SCENARIOS = [
   {
     id: "search",
@@ -114,6 +151,7 @@ const SCENARIOS = [
     query: "我下午要去深圳大学附近玩3个小时",
     context: "通用小团对话；先判断是否应该调起路线插件",
     trigger: "路线意图高/中/低置信分流",
+    routeContext: { source: "xiaotuan", city_hint: APP_CURRENT_CITY },
   },
   {
     id: "favorites",
@@ -228,7 +266,7 @@ function TopBar({ health }) {
       <div className="backend-pill">
         <span className={health?.status === "ok" ? "dot live" : "dot"} />
         <span>真实后端数据</span>
-        <b>{health?.poi_count ? `${health.poi_count} POI · 高德${health?.amap_web_service === "configured" ? "已接" : "兜底"}` : "连接中"}</b>
+        <b>{health?.poi_count ? `${health.poi_count} POI · 高德${health?.amap_web_service === "configured" ? "已接" : "兜底"} · DeepSeek${health?.deepseek === "configured" ? "已接" : "兜底"}` : "连接中"}</b>
       </div>
     </header>
   );
@@ -804,6 +842,52 @@ function ProfileImportPanel({ onImport, loading }) {
   );
 }
 
+function JudgePreferenceModal({ open, scenario, pendingQuery, onSubmit, onSkip, loading }) {
+  const [answers, setAnswers] = useState(DEFAULT_JUDGE_ANSWERS);
+
+  useEffect(() => {
+    if (open) setAnswers(DEFAULT_JUDGE_ANSWERS);
+  }, [open]);
+
+  if (!open) return null;
+  return (
+    <div className="preference-modal-backdrop">
+      <section className="preference-modal">
+        <div className="preference-modal-head">
+          <span>SmartRoute 个性化路线偏好</span>
+          <h2>先用 10 秒生成你的本次画像</h2>
+          <p>{scenario.title}入口 · {pendingQuery || scenario.query}</p>
+        </div>
+        <div className="preference-question-grid">
+          {JUDGE_PROFILE_QUESTIONS.map((question) => (
+            <div key={question.key} className="preference-question">
+              <strong>{question.title}</strong>
+              <div>
+                {question.options.map((option) => (
+                  <button
+                    key={option}
+                    className={answers[question.key] === option ? "active" : ""}
+                    onClick={() => setAnswers((current) => ({ ...current, [question.key]: option }))}
+                  >
+                    {option}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+        <div className="preference-modal-actions">
+          <button className="secondary" onClick={onSkip} disabled={loading}>跳过，直接规划</button>
+          <button onClick={() => onSubmit(answers)} disabled={loading}>
+            {loading ? "生成中" : "使用本次画像规划"}
+          </button>
+        </div>
+        <p className="privacy-note">只生成本次演示画像，不读取真实美团账号、手机号、cookie、订单或精确住址。</p>
+      </section>
+    </div>
+  );
+}
+
 function ProfileModeControl({
   profileMode,
   profileSource,
@@ -823,7 +907,7 @@ function ProfileModeControl({
           模拟画像
         </button>
         <button className={profileSource === "manual_import" ? "active" : ""} onClick={() => onSourceChange("manual_import")}>
-          脱敏真实画像
+          评委/脱敏画像
         </button>
       </div>
       {profileSource === "preset" && (
@@ -1226,6 +1310,31 @@ function TracePanel({ trace }) {
   );
 }
 
+function ToolTracePanel({ title = "ToolUse Trace", steps }) {
+  if (!steps?.length) return null;
+  return (
+    <section className="panel">
+      <div className="section-head">
+        <h2>{title}</h2>
+        <span>ReAct / ToolUse</span>
+      </div>
+      <div className="tool-trace">
+        {steps.map((step, index) => (
+          <article key={`${step.step}-${step.tool}-${index}`} className={step.status}>
+            <div>
+              <span>{step.step}</span>
+              <strong>{step.tool}</strong>
+              <em>{step.status}</em>
+            </div>
+            <p>{step.input}</p>
+            <small>{step.output}</small>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function InsightPanel({ routeView }) {
   if (!routeView) return null;
   const insight = routeView.insight;
@@ -1420,6 +1529,14 @@ function AgentPanel({
               <span>P1 指标</span>
               <p>耗时 {plan.planning_time_ms}ms · 冲突 {plan.constraint_conflicts?.length || 0} 个 · {plan.route_completeness?.is_complete ? "路线完整" : "需继续优化"}</p>
             </div>
+            <div>
+              <span>LLM 解析</span>
+              <p>{plan.intent?.parser_source || "rules"} · 置信度 {Math.round((plan.intent?.parser_confidence || 0) * 100)}% · {plan.intent?.parser_reason}</p>
+            </div>
+            <div>
+              <span>交通策略</span>
+              <p>{plan.intent?.constraints?.transport_mode || "步行+公交"} · {routeView?.route?.transit_segments?.some((item) => String(item.source || "").startsWith("amap")) ? "高德真实分段" : "本地估算/降级"}</p>
+            </div>
           </div>
         </section>
       )}
@@ -1457,6 +1574,9 @@ function AgentPanel({
         </section>
       )}
 
+      <ToolTracePanel title="路线 ToolUse Trace" steps={plan?.tool_trace || []} />
+      <ToolTracePanel title="调整 ToolUse Trace" steps={latestAdjustment?.tool_trace || []} />
+
       {adjustmentHistory.length > 0 && (
         <section className="panel">
           <div className="section-head">
@@ -1478,24 +1598,58 @@ function AgentPanel({
 }
 
 function inferCityHint(text = "") {
-  if (/(深圳|深大|深圳大学|科技园|南山|金地威新|gaga)/i.test(text)) return "深圳";
+  if (/(深圳|深大|深圳大学|科技园|南山|金地威新|gaga|万象天地)/i.test(text)) return "深圳";
   if (/(北京|三里屯|朝阳|国贸)/.test(text)) return "北京";
   if (/(广州|天河|珠江新城)/.test(text)) return "广州";
-  return "上海";
+  if (/(上海|外滩|陆家嘴|南京东路|静安寺|豫园)/.test(text)) return "上海";
+  return null;
+}
+
+function cleanAnchorCandidate(value = "") {
+  let text = value.trim().replace(/^[，。,. 　]+|[，。,. 　]+$/g, "");
+  const prefixes = ["我要去", "我想去", "想去", "要去", "我去", "去", "到", "在", "我要", "我想", "想", "要"];
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const prefix of prefixes) {
+      if (text.startsWith(prefix) && text.length > prefix.length + 1) {
+        text = text.slice(prefix.length).trim().replace(/^[，。,. 　]+|[，。,. 　]+$/g, "");
+        changed = true;
+      }
+    }
+  }
+  return text.slice(0, 24);
 }
 
 function inferAnchorText(text = "") {
-  const known = ["深圳大学", "深大", "金地威新中心", "gaga", "科技园", "深圳湾", "外滩", "南京东路", "陆家嘴", "静安寺"];
+  const known = ["深圳万象天地", "万象天地", "深圳大学", "深大", "金地威新中心", "gaga", "科技园", "深圳湾", "外滩", "南京东路", "陆家嘴", "静安寺"];
   const hit = known.find((item) => text.includes(item));
-  if (hit) return hit;
+  if (hit) return hit === "深圳万象天地" ? "万象天地" : hit;
   if (text.includes("附近")) {
     const prefix = text.split("附近")[0].trim();
-    return prefix.slice(-12) || null;
+    return cleanAnchorCandidate(prefix.slice(-18)) || null;
+  }
+  if (text.includes("周边")) {
+    const prefix = text.split("周边")[0].trim();
+    return cleanAnchorCandidate(prefix.slice(-18)) || null;
   }
   if (text.includes("从") && text.includes("出发")) {
-    return text.split("从")[1].split("出发")[0].trim().slice(0, 24) || null;
+    return cleanAnchorCandidate(text.split("从")[1].split("出发")[0]) || null;
+  }
+  for (const marker of ["，", ",", "。", "帮我", "给我", "规划", "安排", "路线"]) {
+    if (text.includes(marker)) {
+      const candidate = cleanAnchorCandidate(text.split(marker)[0]);
+      if (isLikelyPlaceAnchor(candidate)) return candidate;
+    }
   }
   return null;
+}
+
+function isLikelyPlaceAnchor(value = "") {
+  const text = value.trim();
+  if (text.length < 2 || text.length > 24) return false;
+  if (/(什么|怎么|多少|附近|周边|今天|下午|晚上|小时)/.test(text)) return false;
+  return /(天地|中心|广场|商场|公园|大学|学院|书城|博物馆|美术馆|艺术馆|景区|古镇|步行街|购物中心|城|店)$/.test(text);
 }
 
 function contextForScenario(scenario, nextQuery, explicitContext = null) {
@@ -1503,10 +1657,84 @@ function contextForScenario(scenario, nextQuery, explicitContext = null) {
   const base = explicitContext || scenario?.routeContext || {};
   return {
     source: base.source || scenario?.id || "manual",
-    city_hint: base.city_hint || inferCityHint(queryText),
+    city_hint: base.city_hint || inferCityHint(queryText) || (scenario?.id === "xiaotuan" ? APP_CURRENT_CITY : null),
     anchor_text: base.anchor_text || inferAnchorText(queryText),
     anchor_location: base.anchor_location || null,
     selected_pois: base.selected_pois || [],
+    transport_strategy: base.transport_strategy || null,
+  };
+}
+
+function contextForReplacement(stop, plan, activeRouteContext) {
+  return {
+    ...(activeRouteContext || {}),
+    source: "replace",
+    city_hint: plan?.intent?.city || activeRouteContext?.city_hint || stop?.poi?.district || null,
+    anchor_text: stop?.poi?.name || activeRouteContext?.anchor_text || null,
+    anchor_location: stop?.poi
+      ? {
+          latitude: stop.poi.latitude,
+          longitude: stop.poi.longitude,
+        }
+      : activeRouteContext?.anchor_location || null,
+    selected_pois: [],
+    transport_strategy: activeRouteContext?.transport_strategy || plan?.intent?.constraints?.transport_mode || null,
+  };
+}
+
+function buildJudgeProfilePayload(answers, scenario, routeContext) {
+  const categoryMap = {
+    "咖啡/茶饮": ["咖啡/茶饮"],
+    "展览文化": ["景点"],
+    "本地美食": ["餐饮"],
+    "娱乐玩乐": ["娱乐"],
+    "商场室内": ["购物", "咖啡/茶饮"],
+  };
+  const budgetMap = {
+    "省钱优先": 120,
+    "中等预算": 220,
+    "体验优先": 360,
+  };
+  const waitMap = {
+    "尽量不排队": 8,
+    "可等15分钟": 15,
+    "热门也可以": 35,
+  };
+  const walkMap = {
+    "少走路": "少走路",
+    "步行可接受": "适中",
+    "公交地铁": "公交地铁优先",
+    "打车优先": "少走路",
+  };
+  const transportMap = {
+    "少走路": "短步行+打车",
+    "步行可接受": "步行优先",
+    "公交地铁": "公交/地铁优先",
+    "打车优先": "打车优先",
+  };
+  const content = answers.content || DEFAULT_JUDGE_ANSWERS.content;
+  const companion = answers.companion || DEFAULT_JUDGE_ANSWERS.companion;
+  const budget = answers.budget || DEFAULT_JUDGE_ANSWERS.budget;
+  const queue = answers.queue || DEFAULT_JUDGE_ANSWERS.queue;
+  const mobility = answers.mobility || DEFAULT_JUDGE_ANSWERS.mobility;
+  const area = routeContext?.anchor_text || routeContext?.city_hint || "当前位置";
+  const categories = categoryMap[content] || ["餐饮", "景点"];
+  return {
+    profile: {
+      profile_id: "judge-session",
+      display_name: "评委即时画像",
+      recent_searches: [area, content, companion, mobility, queue],
+      favorite_pois: [`${area}附近${content}`, `${scenario.title}入口偏好`],
+      browsed_pois: [content, companion, budget, queue, mobility],
+      favorite_categories: categories,
+      favorite_districts: routeContext?.city_hint ? [routeContext.city_hint] : [],
+      frequent_districts: routeContext?.city_hint ? [routeContext.city_hint] : [],
+      budget_preference: budgetMap[budget] || 220,
+      max_wait_preference: waitMap[queue] || 15,
+      walk_preference: walkMap[mobility] || "适中",
+      coupon_sensitive: budget === "省钱优先",
+    },
+    transportStrategy: transportMap[mobility] || "步行优先",
   };
 }
 
@@ -1531,6 +1759,9 @@ export default function App() {
   const [adjustmentHistory, setAdjustmentHistory] = useState([]);
   const [latestAdjustment, setLatestAdjustment] = useState(null);
   const [activeRouteContext, setActiveRouteContext] = useState(contextForScenario(SCENARIOS[0], DEFAULT_QUERY));
+  const [preferenceModalOpen, setPreferenceModalOpen] = useState(false);
+  const [pendingPlan, setPendingPlan] = useState(null);
+  const [sessionProfileReady, setSessionProfileReady] = useState(false);
 
   const activeScenario = SCENARIOS.find((scenario) => scenario.id === activeScenarioId) || SCENARIOS[0];
   const selectedRouteView = plan?.routes?.[selectedRouteIndex] || null;
@@ -1596,6 +1827,61 @@ export default function App() {
       setLoading(false);
       setLoadingLabel("");
     }
+  }
+
+  async function requestPlanWithPreference(nextQuery, explicitContext = null, label = "规划中") {
+    const nextContext = contextForScenario(activeScenario, nextQuery, explicitContext);
+    if (!sessionProfileReady) {
+      setPendingPlan({ query: nextQuery, context: nextContext, label });
+      setPreferenceModalOpen(true);
+      return;
+    }
+    await generatePlan(nextQuery, true, profileMode, label, profileSource, importedProfileId, nextContext);
+  }
+
+  async function submitJudgePreference(answers) {
+    const pending = pendingPlan || {
+      query: query || activeScenario.query,
+      context: activeRouteContext,
+      label: "评委画像规划中",
+    };
+    const { profile, transportStrategy } = buildJudgeProfilePayload(answers, activeScenario, pending.context);
+    const nextContext = {
+      ...pending.context,
+      transport_strategy: transportStrategy,
+    };
+    setLoading(true);
+    setLoadingLabel("生成评委即时画像");
+    setError("");
+    try {
+      const response = await postJson("/api/profile/import", profile);
+      const nextProfileId = response.profile.profile_id;
+      await refreshProfileSources(nextProfileId);
+      setProfileSource("manual_import");
+      setImportedProfileId(nextProfileId);
+      setSessionProfileReady(true);
+      setPreferenceModalOpen(false);
+      setPendingPlan(null);
+      setFeedbackStatus("已生成评委即时画像，本次路线会按这些偏好规划。");
+      await generatePlan(pending.query, true, profileMode, pending.label || "评委画像规划中", "manual_import", nextProfileId, nextContext);
+    } catch (err) {
+      setError(err.message || "评委画像生成失败");
+    } finally {
+      setLoading(false);
+      setLoadingLabel("");
+    }
+  }
+
+  function skipJudgePreference() {
+    const pending = pendingPlan || {
+      query: query || activeScenario.query,
+      context: activeRouteContext,
+      label: "规划中",
+    };
+    setSessionProfileReady(true);
+    setPreferenceModalOpen(false);
+    setPendingPlan(null);
+    generatePlan(pending.query, true, profileMode, pending.label || "规划中", profileSource, importedProfileId, pending.context);
   }
 
   function selectScenario(scenario) {
@@ -1679,7 +1965,7 @@ export default function App() {
         source: "xiaotuan",
         context: {
           entry: "问小团",
-          current_city: inferCityHint(trimmed),
+          current_city: inferCityHint(trimmed) || activeRouteContext?.city_hint || activeScenario.routeContext?.city_hint || APP_CURRENT_CITY,
           product: "meituan",
         },
       });
@@ -1687,10 +1973,10 @@ export default function App() {
       if (payload.action === "open_plugin") {
         const nextContext = contextForScenario(activeScenario, payload.planning_query || trimmed, {
           source: "xiaotuan",
-          city_hint: inferCityHint(payload.planning_query || trimmed),
+          city_hint: inferCityHint(payload.planning_query || trimmed) || activeRouteContext?.city_hint || activeScenario.routeContext?.city_hint || APP_CURRENT_CITY,
           anchor_text: inferAnchorText(payload.planning_query || trimmed),
         });
-        await generatePlan(payload.planning_query || trimmed, true, profileMode, "规划中", profileSource, importedProfileId, nextContext);
+        await requestPlanWithPreference(payload.planning_query || trimmed, nextContext, "规划中");
       }
     } catch (err) {
       setError(err.message || "意图识别失败");
@@ -1729,6 +2015,7 @@ export default function App() {
         constraint_conflicts: payload.constraint_conflicts,
         route_completeness: payload.route_completeness,
         trace: [...(plan.trace || []), `实时调整：${payload.adjustment_summary}`],
+        tool_trace: plan.tool_trace || [],
       });
       setLatestAdjustment(payload);
       const deltas = payload.metric_deltas || {};
@@ -1769,6 +2056,10 @@ export default function App() {
         route: selectedRouteView.route,
         stop_order: stop.order,
         user_id: USER_ID,
+        profile_mode: profileMode,
+        profile_source: profileSource,
+        profile_id: profileSource === "manual_import" ? importedProfileId : null,
+        route_context: contextForReplacement(stop, plan, activeRouteContext),
       });
       setReplacement({ loading: false, stop, options: payload.options || [] });
     } catch (err) {
@@ -1834,8 +2125,7 @@ export default function App() {
           loading={loading}
           routeIntent={routeIntent}
           onOpenRoute={(nextQuery, explicitContext) => {
-            const nextContext = contextForScenario(activeScenario, nextQuery, explicitContext);
-            generatePlan(nextQuery, true, profileMode, "规划中", profileSource, importedProfileId, nextContext);
+            requestPlanWithPreference(nextQuery, explicitContext, "规划中");
           }}
           onAskXiaotuan={askXiaotuan}
           profileMode={profileMode}
@@ -1866,6 +2156,14 @@ export default function App() {
         />
       </div>
       <ReplacePanel replacement={replacement} onClose={() => setReplacement(null)} onApply={applyReplacement} />
+      <JudgePreferenceModal
+        open={preferenceModalOpen}
+        scenario={activeScenario}
+        pendingQuery={pendingPlan?.query}
+        onSubmit={submitJudgePreference}
+        onSkip={skipJudgePreference}
+        loading={loading}
+      />
     </main>
   );
 }

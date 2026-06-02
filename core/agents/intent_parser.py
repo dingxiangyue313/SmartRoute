@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 from typing import Any
+
+from openai import OpenAI
 
 from core.models import POICategory, ParsedIntent, UserConstraints
 
@@ -56,14 +59,31 @@ DISTRICT_ALIASES = {
 class IntentParserAgent:
     """Parse natural language trip requests into structured constraints.
 
-    A heuristic parser is intentionally kept as the default path. It makes the
-    hackathon demo deterministic, while leaving room for DeepSeek enhancement.
+    DeepSeek is used when configured, but the heuristic parser remains a full
+    fallback so the hackathon demo is deterministic without external keys.
     """
+
+    def __init__(self) -> None:
+        self.api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+        self.model = os.getenv("DEEPSEEK_CHAT_MODEL", "deepseek-chat").strip() or "deepseek-chat"
+        self.base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip()
 
     def parse(
         self,
         user_input: str,
         conversation_history: list[dict[str, str]] | None = None,
+        user_profile: dict[str, Any] | None = None,
+    ) -> ParsedIntent:
+        rules_intent = self._parse_with_rules(user_input, user_profile=user_profile)
+        if self.api_key:
+            llm_intent = self._parse_with_llm(user_input, rules_intent, conversation_history, user_profile)
+            if llm_intent:
+                return llm_intent
+        return rules_intent
+
+    def _parse_with_rules(
+        self,
+        user_input: str,
         user_profile: dict[str, Any] | None = None,
     ) -> ParsedIntent:
         text = user_input.strip()
@@ -104,9 +124,183 @@ class IntentParserAgent:
                 "travel_style": style,
                 "special_requirements": special_requirements,
                 "raw_query": text,
+                "intent_parser_source": "rules",
             },
             clarification_needed=False,
+            parser_source="rules",
+            parser_confidence=0.72,
+            parser_reason="本地规则兜底解析，保证无 DeepSeek Key 时仍可稳定规划。",
+            llm_slots={},
         )
+
+    def _parse_with_llm(
+        self,
+        user_input: str,
+        rules_intent: ParsedIntent,
+        conversation_history: list[dict[str, str]] | None = None,
+        user_profile: dict[str, Any] | None = None,
+    ) -> ParsedIntent | None:
+        client = OpenAI(api_key=self.api_key, base_url=self.base_url, timeout=5.0)
+        system_prompt = (
+            "你是美团 SmartRoute 的结构化出行需求解析器。"
+            "请把用户自然语言解析为本地生活路线规划约束，只返回 JSON，不要 Markdown。"
+            "如果用户没有提到某字段，返回 null 或空数组，不要编造。"
+        )
+        user_prompt = {
+            "query": user_input,
+            "conversation_history": conversation_history or [],
+            "user_profile": user_profile or {},
+            "rules_fallback": rules_intent.model_dump(mode="json"),
+            "schema": {
+                "city": "城市，如上海/深圳/北京/广州",
+                "query_type": "路线规划|单点查询",
+                "confidence": "0到1的小数",
+                "reason": "一句中文解析理由",
+                "slots": {
+                    "anchor_text": "区域/地标/商户锚点",
+                    "total_time_hours": "数字",
+                    "budget_per_person": "数字或null",
+                    "party_size": "数字",
+                    "max_wait_minutes": "数字",
+                    "max_walk_minutes": "数字",
+                    "start_time": "HH:MM",
+                    "start_location": "起点或null",
+                    "transport_mode": "步行优先/短步行+打车/驾车/公交/地铁+步行等",
+                    "preferred_categories": ["餐饮", "咖啡/茶饮", "景点", "娱乐", "购物"],
+                    "preferred_districts": ["区域或商圈"],
+                    "travel_style": "文艺/轻松/省钱/亲子/浪漫/不踩雷等",
+                    "special_requirements": ["少排队", "少走路", "拍照", "优惠等"],
+                },
+            },
+        }
+        try:
+            response = client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": json.dumps(user_prompt, ensure_ascii=False)},
+                ],
+                temperature=0,
+                response_format={"type": "json_object"},
+            )
+            content = response.choices[0].message.content or "{}"
+            payload = json.loads(content)
+            slots = payload.get("slots") if isinstance(payload.get("slots"), dict) else {}
+            return self._merge_llm_slots(rules_intent, payload, slots, user_input)
+        except Exception:
+            return None
+
+    def _merge_llm_slots(
+        self,
+        rules_intent: ParsedIntent,
+        payload: dict[str, Any],
+        slots: dict[str, Any],
+        raw_query: str,
+    ) -> ParsedIntent:
+        next_intent = rules_intent.model_copy(deep=True)
+        constraints = next_intent.constraints
+
+        city = str(payload.get("city") or slots.get("city") or "").strip()
+        if city:
+            constraints.city = city
+            next_intent.city = city
+
+        next_intent.query_type = str(payload.get("query_type") or next_intent.query_type)
+        confidence = self._safe_float(payload.get("confidence"), 0.82)
+        next_intent.parser_source = "llm"
+        next_intent.parser_confidence = max(0.0, min(1.0, confidence))
+        next_intent.parser_reason = str(payload.get("reason") or "DeepSeek 结构化解析完成。")
+        next_intent.llm_slots = slots
+
+        constraints.total_time_hours = self._safe_float(slots.get("total_time_hours"), constraints.total_time_hours)
+        constraints.budget_per_person = self._safe_optional_float(slots.get("budget_per_person"), constraints.budget_per_person)
+        constraints.party_size = self._safe_int(slots.get("party_size"), constraints.party_size)
+        constraints.max_wait_minutes = self._safe_int(slots.get("max_wait_minutes"), constraints.max_wait_minutes)
+        constraints.max_walk_minutes = self._safe_int(slots.get("max_walk_minutes"), constraints.max_walk_minutes)
+
+        for text_field, attr in [
+            ("start_time", "start_time"),
+            ("start_location", "start_location"),
+            ("transport_mode", "transport_mode"),
+        ]:
+            value = slots.get(text_field)
+            if isinstance(value, str) and value.strip():
+                setattr(constraints, attr, value.strip())
+
+        categories = self._normalize_categories(slots.get("preferred_categories"))
+        if categories:
+            constraints.preferred_categories = categories
+
+        districts = self._normalize_string_list(slots.get("preferred_districts"))
+        if districts:
+            constraints.preferred_districts = districts
+
+        special_requirements = self._normalize_string_list(slots.get("special_requirements"))
+        travel_style = slots.get("travel_style") if isinstance(slots.get("travel_style"), str) else None
+        anchor_text = slots.get("anchor_text") if isinstance(slots.get("anchor_text"), str) else None
+        next_intent.extracted_preferences.update(
+            {
+                "raw_query": raw_query,
+                "travel_style": travel_style or next_intent.extracted_preferences.get("travel_style", "休闲"),
+                "special_requirements": "、".join(special_requirements)
+                or next_intent.extracted_preferences.get("special_requirements", "无"),
+                "anchor_text": anchor_text or next_intent.extracted_preferences.get("anchor_text"),
+                "intent_parser_source": "llm",
+            }
+        )
+        return next_intent
+
+    def _normalize_categories(self, value: Any) -> list[POICategory]:
+        aliases = {
+            "咖啡": "咖啡/茶饮",
+            "茶饮": "咖啡/茶饮",
+            "美食": "餐饮",
+            "餐厅": "餐饮",
+            "展览": "景点",
+            "文化": "景点",
+            "玩乐": "娱乐",
+        }
+        items = self._normalize_string_list(value)
+        categories: list[POICategory] = []
+        for item in items:
+            category_text = aliases.get(item, item)
+            try:
+                category = POICategory(category_text)
+            except ValueError:
+                continue
+            if category not in categories:
+                categories.append(category)
+        return categories
+
+    def _normalize_string_list(self, value: Any) -> list[str]:
+        if value is None:
+            return []
+        raw_items = value if isinstance(value, list) else [value]
+        items: list[str] = []
+        for item in raw_items:
+            text = str(item).strip()
+            if text and text not in items:
+                items.append(text[:32])
+        return items[:8]
+
+    def _safe_float(self, value: Any, default: float) -> float:
+        try:
+            parsed = float(value)
+            return parsed if parsed > 0 else default
+        except (TypeError, ValueError):
+            return default
+
+    def _safe_optional_float(self, value: Any, default: float | None) -> float | None:
+        if value in (None, "", "null"):
+            return default
+        return self._safe_float(value, default or 0.0)
+
+    def _safe_int(self, value: Any, default: int) -> int:
+        try:
+            parsed = int(float(value))
+            return parsed if parsed > 0 else default
+        except (TypeError, ValueError):
+            return default
 
     def _extract_hours(self, text: str) -> float:
         if "半天" in text:

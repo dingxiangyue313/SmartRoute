@@ -97,13 +97,32 @@ class AMapClient:
                 source="context_location",
             )
 
+        if not clean_text:
+            return None
+
+        if self.enabled:
+            try:
+                payload = self._get(
+                    "/v5/place/text",
+                    {
+                        "keywords": clean_text,
+                        "region": normalize_city_hint(city_hint) or "",
+                        "show_fields": "business",
+                        "page_size": "8",
+                        "output": "JSON",
+                    },
+                )
+                for item in payload.get("pois") or []:
+                    anchor = anchor_from_amap_poi_item(item, clean_text, city_hint)
+                    if anchor:
+                        return anchor
+            except Exception:
+                pass
+
         known = resolve_known_anchor(clean_text)
         if known:
             city, location = known
             return AMapAnchor(text=clean_text, city=normalize_city_hint(city_hint) or city, location=location, source="known_anchor")
-
-        if not clean_text:
-            return None
 
         if self.enabled:
             try:
@@ -143,7 +162,7 @@ class AMapClient:
 
         for category in categories:
             type_codes = CATEGORY_TYPE_CODES.get(category, "")
-            query_terms = terms or keywords_for_category(category)
+            query_terms = list(dict.fromkeys([*keywords_for_category(category), *terms]))
             for keyword in query_terms[:3]:
                 try:
                     payload = self._get(
@@ -169,10 +188,21 @@ class AMapClient:
                     continue
         return sort_by_anchor_distance(pois)
 
-    def route_segment(self, origin: POI, destination: POI, mode: str = "步行+公交") -> AMapRouteSegment | None:
+    def route_segment(
+        self,
+        origin: POI,
+        destination: POI,
+        mode: str = "步行+公交",
+        city: str | None = None,
+    ) -> AMapRouteSegment | None:
         if not self.enabled:
             return None
-        api_mode = "driving" if "打车" in mode or "驾车" in mode else "walking"
+        api_mode = transport_api_mode(mode)
+        if api_mode == "transit":
+            transit_segment = self._transit_segment(origin, destination, mode, city)
+            if transit_segment:
+                return transit_segment
+            api_mode = "walking"
         path = "/v3/direction/driving" if api_mode == "driving" else "/v3/direction/walking"
         try:
             payload = self._get(
@@ -208,6 +238,56 @@ class AMapClient:
         except Exception:
             return None
 
+    def _transit_segment(
+        self,
+        origin: POI,
+        destination: POI,
+        mode: str,
+        city: str | None,
+    ) -> AMapRouteSegment | None:
+        try:
+            payload = self._get(
+                "/v3/direction/transit/integrated",
+                {
+                    "origin": f"{origin.longitude},{origin.latitude}",
+                    "destination": f"{destination.longitude},{destination.latitude}",
+                    "city": normalize_city_hint(city or origin.district) or origin.district,
+                    "cityd": normalize_city_hint(city or destination.district) or destination.district,
+                    "strategy": "0",
+                    "nightflag": "0",
+                    "extensions": "base",
+                    "output": "JSON",
+                },
+            )
+            route = payload.get("route") or {}
+            transits = route.get("transits") or []
+            if not transits:
+                return None
+            first = transits[0]
+            duration_seconds = int(float(first.get("duration") or 0))
+            distance_meters = int(float(first.get("distance") or 0))
+            polyline: list[list[float]] = []
+            for segment in first.get("segments") or []:
+                walking = segment.get("walking") if isinstance(segment.get("walking"), dict) else {}
+                for step in walking.get("steps") or []:
+                    polyline.extend(parse_polyline(step.get("polyline") or ""))
+                bus = segment.get("bus") if isinstance(segment.get("bus"), dict) else {}
+                for busline in bus.get("buslines") or []:
+                    polyline.extend(parse_polyline(busline.get("polyline") or ""))
+            if not polyline:
+                polyline = [[origin.longitude, origin.latitude], [destination.longitude, destination.latitude]]
+            return AMapRouteSegment(
+                origin_id=origin.id,
+                destination_id=destination.id,
+                mode="transit",
+                distance_meters=distance_meters,
+                duration_minutes=max(1, math.ceil(duration_seconds / 60)),
+                polyline=dedupe_polyline(polyline),
+                source="amap_transit",
+            )
+        except Exception:
+            return None
+
     def _get(self, path: str, params: dict[str, str]) -> dict[str, Any]:
         query = {key: value for key, value in params.items() if value not in (None, "")}
         query["key"] = self.key
@@ -217,7 +297,7 @@ class AMapClient:
             payload = json.loads(response.read().decode("utf-8"))
         status = str(payload.get("status", "1"))
         infocode = str(payload.get("infocode", "10000"))
-        if status != "1" and infocode != "10000":
+        if status != "1" or infocode != "10000":
             raise RuntimeError(payload.get("info") or "AMap request failed")
         return payload
 
@@ -239,6 +319,15 @@ def normalize_city_hint(city: str | None) -> str | None:
     return value.replace("市", "")
 
 
+def transport_api_mode(mode: str | None) -> str:
+    value = (mode or "").lower()
+    if any(word in value for word in ["打车", "驾车", "出租", "taxi", "drive"]):
+        return "driving"
+    if any(word in value for word in ["公交", "地铁", "公共交通", "transit", "metro"]):
+        return "transit"
+    return "walking"
+
+
 def resolve_known_anchor(text: str | None) -> tuple[str, GeoPoint] | None:
     value = (text or "").replace(" ", "")
     if not value:
@@ -257,6 +346,30 @@ def parse_location(value: str | None) -> GeoPoint | None:
         return GeoPoint(latitude=float(lat_text), longitude=float(lng_text))
     except ValueError:
         return None
+
+
+def anchor_from_amap_poi_item(item: dict[str, Any], fallback_text: str, city_hint: str | None = None) -> AMapAnchor | None:
+    location = parse_location(item.get("location"))
+    if not location:
+        return None
+    city = city_from_amap_item(item, city_hint)
+    return AMapAnchor(
+        text=fallback_text or str(item.get("name") or "位置"),
+        city=city or "未知城市",
+        location=location,
+        source="amap_poi_text",
+    )
+
+
+def city_from_amap_item(item: dict[str, Any], city_hint: str | None = None) -> str | None:
+    for key in ["cityname", "city", "pname", "adname"]:
+        value = item.get(key)
+        if isinstance(value, list):
+            value = value[0] if value else None
+        normalized = normalize_city_hint(str(value or ""))
+        if normalized:
+            return normalized
+    return normalize_city_hint(city_hint)
 
 
 def parse_polyline(value: str) -> list[list[float]]:
@@ -289,17 +402,20 @@ def poi_from_amap(item: dict[str, Any], category: POICategory, anchor: AMapAncho
     if not location:
         return None
     business = item.get("business") if isinstance(item.get("business"), dict) else {}
+    name = str(item.get("name") or "高德 POI")
+    type_name = str(item.get("type") or "")
+    if is_unsuitable_for_route(name, type_name, category):
+        return None
     rating = parse_float(business.get("rating"), 4.4)
     price = parse_float(business.get("cost"), default_price(category))
     distance = parse_int(item.get("distance"), None)
     tags = [category.value]
-    type_name = str(item.get("type") or "")
     if type_name:
         tags.extend([part for part in type_name.split(";") if part][:2])
     return POI(
         id=f"amap-{item.get('id') or stable_token(item.get('name', ''), location.longitude, location.latitude)}",
         external_id=str(item.get("id") or ""),
-        name=str(item.get("name") or "高德 POI"),
+        name=name,
         category=category,
         address=str(item.get("address") or ""),
         district=str(item.get("adname") or anchor.city),
@@ -316,6 +432,17 @@ def poi_from_amap(item: dict[str, Any], category: POICategory, anchor: AMapAncho
         source="amap",
         distance_from_anchor_meters=distance,
     )
+
+
+def is_unsuitable_for_route(name: str, type_name: str, category: POICategory) -> bool:
+    text = f"{name} {type_name}"
+    general_blocklist = ["派出所", "公安", "医院", "诊所", "银行", "公厕", "停车场", "写字楼", "公司"]
+    if any(word in text for word in general_blocklist):
+        return True
+    if category in {POICategory.ATTRACTION, POICategory.ENTERTAINMENT}:
+        culture_blocklist = ["小学", "中学", "幼儿园", "培训", "教育机构", "驾校"]
+        return any(word in text for word in culture_blocklist)
+    return False
 
 
 def sort_by_anchor_distance(pois: list[POI]) -> list[POI]:

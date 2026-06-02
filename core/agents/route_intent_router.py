@@ -105,6 +105,7 @@ class RouteIntentRouterAgent:
         location_hits = self._extract_location_hits(query)
         time_hit = bool(re.search(r"(上午|下午|晚上|今晚|明天|周末|半天|一天|\d+\s*(?:个)?小时|\d{1,2}\s*点)", query))
         duration_hit = bool(re.search(r"(半天|一天|\d+\s*(?:个)?小时)", query))
+        nearby_location_hit = bool(location_hits) or bool(re.search(r"(?:想去|要去|我去|去|到|在)?\s*([\u4e00-\u9fffA-Za-z0-9·]{2,24})(?:附近|周边)", query))
         route_hit = any(word in query for word in ["路线", "规划", "安排", "串", "怎么走", "怎么玩", "半天玩", "一日游", "吃完再", "逛逛"])
         local_life_hit = any(
             word in query
@@ -135,7 +136,11 @@ class RouteIntentRouterAgent:
             action = "normal_answer"
             confidence = 0.18
             reason = "用户更像在问单店信息或交易信息，不应默认打开路线插件"
-        elif route_hit and (location_hits or time_hit or local_life_hit):
+        elif duration_hit and nearby_location_hit and local_life_hit:
+            action = "open_plugin"
+            confidence = 0.88
+            reason = "用户给出了明确地点、附近范围和游玩时长，适合直接调起路线规划插件"
+        elif route_hit and (location_hits or nearby_location_hit or time_hit or local_life_hit):
             action = "open_plugin"
             confidence = 0.88
             reason = "用户表达了区域/时间/吃喝玩乐目标，并带有路线或安排意图"
@@ -207,8 +212,18 @@ class RouteIntentRouterAgent:
             "金地威新",
             "南山",
             "福田",
+            "中山大学",
         ]
-        return [item for item in candidates if item in query]
+        hits = [item for item in candidates if item in query]
+        for pattern in [
+            r"(?:想去|要去|我要去|我想去|去|到|在)\s*([\u4e00-\u9fffA-Za-z0-9·]{2,24})(?:附近|周边)",
+            r"([\u4e00-\u9fffA-Za-z0-9·]{2,24}(?:大学|学院|公园|商圈|中心|广场|景区|景点))(?:附近|周边)",
+        ]:
+            for match in re.finditer(pattern, query):
+                location = clean_location_text(match.group(1))
+                if location and location not in hits:
+                    hits.append(location)
+        return hits
 
     def _build_planning_query(self, query: str, action: str) -> str:
         if action == "normal_answer":
@@ -216,3 +231,16 @@ class RouteIntentRouterAgent:
         if any(word in query for word in ["路线", "规划", "安排"]):
             return query
         return f"{query}，帮我规划成一条可执行路线"
+
+
+def clean_location_text(value: str) -> str:
+    text = value.strip("，。,. 　")
+    prefixes = ["我要去", "我想去", "想去", "要去", "我去", "去", "到", "在", "我要", "我想", "想", "要"]
+    changed = True
+    while changed:
+        changed = False
+        for prefix in prefixes:
+            if text.startswith(prefix) and len(text) > len(prefix) + 1:
+                text = text[len(prefix):].strip("，。,. 　")
+                changed = True
+    return text[:24]

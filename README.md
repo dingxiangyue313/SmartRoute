@@ -22,33 +22,50 @@ python data/seed_db.py
 streamlit run app.py
 ```
 
-应用会生成 500 条上海模拟 POI，并建立本地检索索引。没有 DeepSeek API Key 也能运行；后续可以把意图解析和路线规划替换为 DeepSeek Function Calling。
+应用会生成 500 条本地模拟 POI，并建立本地检索索引。没有 DeepSeek API Key 也能运行；配置 Key 后会启用 LLM 意图解析和调整工具选择，无 Key 时自动规则兜底。
 
 ## 当前能力
 
 - Web Demo 以“搜索页 / 问小团 / 收藏夹 / POI 详情页”四个美团入口调起 SmartRoute 插件
 - 四个入口会把真实上下文传给后端：小团/搜索传地点锚点，收藏夹传已选 POI，详情页传当前商户坐标
 - 小团入口支持路线意图识别：优先 DeepSeek，失败或无 Key 时规则兜底
-- 自然语言解析时间、预算、人数、排队、区域和偏好
+- 自然语言解析时间、预算、人数、排队、区域和偏好；`IntentParserAgent` 已支持 DeepSeek LLM 优先 + 规则兜底
 - 本地 POI 检索与多条件过滤
 - 主路线稳定生成 >=3 个 POI
 - 主路线覆盖餐饮/咖啡 + 景点/娱乐
 - 生成 2 条差异化路线
 - 支持三种模拟美团用户画像：低排队务实型、文艺体验型、带爸妈轻松型
 - 支持脱敏真实画像导入：手动整理搜索词、收藏 POI、浏览偏好、预算、排队和步行偏好后导入，不登录账号、不抓 cookie
+- 支持评委即时画像弹窗：首次调起 SmartRoute 时选择同行人群、预算、排队、交通和内容偏好，生成 `judge-session` 临时画像
 - 展示“画像信号 → 召回加权 → 路线变化”，说明为什么不同画像会得到不同路线
-- 支持自然语言局部调整：少走路、便宜点、不要排队、加晚餐/咖啡/展览
+- 支持自然语言局部调整：少走路、便宜点、不要排队、加晚餐/咖啡/展览；`/api/adjust` 返回 ReAct / ToolUse 风格 `tool_trace`
 - 展示规划耗时、路线完整性、冲突解释和结构化生成后追问
 - 展示调整状态、调整前后指标变化、站点变化和失败时的约束放宽建议
-- 高德地图展示站点与路线；后端支持高德 Web 服务地理编码、周边 POI 和路径规划，未配置 Key 时按用户锚点生成本地兜底路线
+- 高德地图展示站点与路线；后端支持高德 Web 服务 POI 文本搜索、地理编码、周边 POI 和步行/公交/打车策略化路径规划，未配置 Key 时按用户锚点生成本地兜底路线
 - 同类 POI 替换，展示预算/等待/距离影响
 - SQLite 记录用户反馈和偏好
 
 ## 当前待补齐
 
 - 当前支持模拟画像和脱敏手动导入画像；不接真实美团账号授权、真实搜索历史或收藏接口
-- DeepSeek Function Calling / ToolUse 尚未接入调整链路
 - 高德 Web 服务 Key 未配置时，真实 POI 和真实道路 polyline 会降级为锚点附近兜底 POI 与估算路径
+- `official_api` 仍是预留 adapter；没有美团或大赛方授权时，不读取真实客户数据
+
+### DeepSeek API Key
+
+1. 打开 DeepSeek Platform，进入 API Keys 页面创建 Key。
+2. 在项目根目录新建或编辑 `.env`，填入：
+
+```bash
+DEEPSEEK_API_KEY=你的DeepSeekKey
+DEEPSEEK_CHAT_MODEL=deepseek-chat
+DEEPSEEK_ROUTE_MODEL=deepseek-reasoner
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+```
+
+3. 重启 FastAPI 后端。Key 只放后端 `.env`，不要写进前端代码，也不要提交 GitHub。
+
+无 Key 时，路线意图识别、路线需求解析和调整链路都会降级为本地规则，不影响 Demo 跑通。
 
 ## 产品化前端 Demo
 
@@ -127,3 +144,4 @@ npm run build
 - [Design](docs/DESIGN.md)：美团内嵌插件动线、移动端/桌面端设计规范
 - [Architecture](docs/ARCHITECTURE.md)：技术栈、Agent 链路、API、数据模型
 - [TODO](docs/TODO.md)：下一步开发任务和验收提醒
+- [Deployment](docs/DEPLOYMENT.md)：服务器部署、GitHub 同步和自动部署
