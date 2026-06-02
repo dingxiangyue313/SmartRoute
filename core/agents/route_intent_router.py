@@ -127,6 +127,10 @@ class RouteIntentRouterAgent:
                 "深大",
                 "科技园",
                 "深圳湾",
+                "万象天地",
+                "海岸城",
+                "欢乐海岸",
+                "车公庙",
             ]
         )
         constraints = [word for word in ["预算", "人均", "不排队", "少排队", "少走路", "爸妈", "老人", "孩子", "情侣"] if word in query]
@@ -213,11 +217,17 @@ class RouteIntentRouterAgent:
             "南山",
             "福田",
             "中山大学",
+            "万象天地",
+            "海岸城",
+            "欢乐海岸",
+            "车公庙",
         ]
         hits = [item for item in candidates if item in query]
         for pattern in [
             r"(?:想去|要去|我要去|我想去|去|到|在)\s*([\u4e00-\u9fffA-Za-z0-9·]{2,24})(?:附近|周边)",
             r"([\u4e00-\u9fffA-Za-z0-9·]{2,24}(?:大学|学院|公园|商圈|中心|广场|景区|景点))(?:附近|周边)",
+            r"(?:我下午|今天|明天|周末|上午|下午|晚上|今晚)?(?:想去|要去|我要去|我想去|去|到|在)?\s*([\u4e00-\u9fffA-Za-z0-9·]{2,24})(?:附近|周边)?(?:玩|逛|吃|下午茶|看展|看电影)\s*(?:半天|一天|\d+\s*(?:个)?小时)",
+            r"(?:我下午|今天|明天|周末|上午|下午|晚上|今晚)?(?:想去|要去|我要去|我想去|去|到|在)?\s*([\u4e00-\u9fffA-Za-z0-9·]{2,24})\s*(?:半天|一天|\d+\s*(?:个)?小时)",
         ]:
             for match in re.finditer(pattern, query):
                 location = clean_location_text(match.group(1))
@@ -243,4 +253,5 @@ def clean_location_text(value: str) -> str:
             if text.startswith(prefix) and len(text) > len(prefix) + 1:
                 text = text[len(prefix):].strip("，。,. 　")
                 changed = True
+    text = re.sub(r"(?:附近|周边)?(?:玩|逛|吃|下午茶|看展|看电影)$", "", text).strip("，。,. 　")
     return text[:24]

@@ -495,12 +495,18 @@ def test_route_intent_rules_fallback(monkeypatch):
     client = TestClient(app)
 
     high = client.post("/api/route-intent", json={"query": "我下午要去外滩玩3个小时", "source": "xiaotuan"})
+    known_landmark = client.post("/api/route-intent", json={"query": "万象天地玩3小时", "source": "xiaotuan"})
+    arbitrary_anchor = client.post("/api/route-intent", json={"query": "三里屯逛2小时", "source": "xiaotuan"})
     medium = client.post("/api/route-intent", json={"query": "外滩下午有什么好玩的", "source": "xiaotuan"})
     low = client.post("/api/route-intent", json={"query": "这家店电话是多少", "source": "xiaotuan"})
 
     assert high.status_code == 200
     assert high.json()["action"] == "open_plugin"
     assert high.json()["source"] == "rules"
+    assert known_landmark.json()["action"] == "open_plugin"
+    assert known_landmark.json()["detected_slots"]["location"] == "万象天地"
+    assert arbitrary_anchor.json()["action"] == "open_plugin"
+    assert arbitrary_anchor.json()["detected_slots"]["location"] == "三里屯"
     assert medium.json()["action"] == "ask_confirm"
     assert low.json()["action"] == "normal_answer"
 
