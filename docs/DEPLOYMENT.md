@@ -64,6 +64,23 @@ VITE_AMAP_SECURITY_JS_CODE=你的高德 JS 安全密钥
 
 注意：高德 JS API Key 的域名白名单要包含 `42.193.138.163`。如果后续绑定域名，也要把域名加入白名单。
 
+后端的 `AMAP_WEB_SERVICE_KEY` 必须是高德控制台里“服务平台 = Web服务”的 Key，不能使用“Web端(JS API)”Key。若误用 JS Key，高德 Web 服务会返回：
+
+```text
+USERKEY_PLAT_NOMATCH
+infocode: 10009
+```
+
+验证后端高德 Key：
+
+```bash
+cd /opt/smartroute
+source .env
+curl "https://restapi.amap.com/v5/place/text?keywords=北京金鱼胡同&region=北京&page_size=3&key=$AMAP_WEB_SERVICE_KEY"
+```
+
+返回 `status=1` 才说明服务器可调用真实 POI 搜索。
+
 ## 3. 构建并启动服务
 
 ```bash
@@ -100,6 +117,28 @@ systemctl reload nginx
 ```text
 http://42.193.138.163/
 ```
+
+部署后验证：
+
+```bash
+curl http://127.0.0.1:8000/api/health
+```
+
+期望看到：
+
+```json
+{"amap_web_service":"configured","deepseek":"configured"}
+```
+
+真实地点链路验证：
+
+```bash
+curl -sS -X POST http://127.0.0.1:8000/api/plan \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"在北京金鱼胡同附近玩3个小时，帮我规划成一条可执行路线","user_id":"deploy-check","route_context":{"source":"xiaotuan","city_hint":"北京","anchor_text":"北京金鱼胡同"}}'
+```
+
+响应中的候选或路线站点应包含 `source: "amap"` 且区域为北京/东城区附近。若高德调用失败，系统应返回失败 trace，不应返回上海本地 POI。
 
 ## 4. 自动部署
 

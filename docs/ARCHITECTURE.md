@@ -35,7 +35,8 @@
 User Query
 → IntentParserAgent (DeepSeek LLM + rules fallback)
 → RouteContext Resolver / AMap Adapter
-→ POIRetrieverAgent or AMap POI Search
+→ Live Location Gate
+→ AMap POI Search or POIRetrieverAgent
 → RoutePlannerAgent
 → AMap Direction Enrichment
 → RouteInsight / Explanation
@@ -63,8 +64,9 @@ XiaoTuan Query
 - `RouteIntentRouterAgent`：判断小团通用提问是否应该调起 SmartRoute，优先 DeepSeek，失败或无 Key 时规则兜底，输出置信度、触发理由和建议动作。
 - `IntentParserAgent`：解析自然语言中的城市、时间、预算、人数、等待、区域、类别和风格；配置 DeepSeek Key 后优先用 LLM 输出结构化槽位，无 Key 或失败时规则兜底。
 - `ToolUse Adjustment Chain`：`/api/adjust` 以 ReAct / ToolUse 风格组织 Parse adjustment、Search replacement POI、Validate constraints、Update route、Explain changes，并返回 `tool_trace` 给前端展示。
-- `POIRetrieverAgent`：根据约束和用户画像，从本地索引召回候选 POI。
-- `AMapClient`：使用 `AMAP_WEB_SERVICE_KEY` 调用高德 Web 服务，优先用 POI 文本搜索把“中山大学/深圳大学/三里屯/外滩/当前店铺”解析为真实锚点，地理编码作为兜底；随后召回周边 POI，并补充真实道路 polyline。无 Key 或失败时返回非阻断降级。
+- `Live Location Gate`：判断请求是否包含明确城市、地标、商圈、入口坐标或已选 POI。命中后进入真实地点模式，禁止跨城回退到本地 RAG。
+- `POIRetrieverAgent`：根据约束和用户画像，从本地索引召回候选 POI；仅用于无明确地点的通用演示或本地兜底，不覆盖真实地点模式。
+- `AMapClient`：使用 `AMAP_WEB_SERVICE_KEY` 调用高德 Web 服务，优先用 POI 文本搜索把“北京金鱼胡同/中山大学/深圳大学/三里屯/外滩/当前店铺”解析为真实锚点，地理编码作为兜底；随后召回周边 POI，并补充真实道路 polyline。适配器会记录最近错误，便于排查 Key 类型、权限、额度或网络问题。
 - `RoutePlannerAgent`：生成紧凑、高分、低等待等路线变体。
 - `UserProfileManager`：读取和写入 SQLite 用户画像，沉淀喜欢/不合适反馈。
 - `route_insight`：生成可信度、约束命中、预算剩余、步行强度、人群适配和风险解释。
@@ -130,6 +132,7 @@ XiaoTuan Query
 - `route_context` 支持搜索/小团的地点锚点、收藏夹已选 POI、POI 详情页当前商户坐标。
 - 返回解析意图、用户画像、画像来源、模拟/脱敏画像上下文、候选 POI、路线方案、生成 trace、规划耗时、画像影响、冲突解释、路线完整性和结构化生成后追问。
 - P2 返回 `tool_trace`，展示 LLM/规则解析、画像构建、POI 搜索、路线规划和高德路径分段。
+- 真实地点模式：若 query 或 `route_context` 含明确地点/城市/坐标，候选必须来自高德或入口已选 POI；高德失败时返回空候选和失败 trace，不进入上海本地 RAG。
 
 `POST /api/adjust`
 
@@ -205,6 +208,7 @@ DeepSeek、豆包、OpenAI 等通用模型适合做：
 - 不提交 `web/.env.local`、高德 Key 或其他密钥。
 - 不破坏现有 `POI`、`Route`、`UserConstraints` 模型。
 - 新增能力优先通过 API 扩展，而不是只改前端展示。
+- 明确地点/城市/坐标的请求必须走高德 Web 服务或入口已选 POI；禁止静默回退到其他城市本地数据。
 - 每条主路线需要稳定满足 >=3 POI。
 - 每条主路线需要强制覆盖餐饮 + 文化/娱乐。
 - 调整路线时必须保留当前路线上下文，避免表现为“重新开始”。
@@ -213,5 +217,6 @@ DeepSeek、豆包、OpenAI 等通用模型适合做：
 
 - DeepSeek Key 未配置或额度不足时，LLM 解析和工具选择会规则兜底，展示源会标记为 `fallback`。
 - 当前画像支持模拟画像和脱敏手动导入画像，不是真实美团官方账号授权数据。
-- 高德 Web 服务 Key 缺失或域名/额度限制时，会降级为锚点附近本地候选和估算路径；不会让 Demo 白屏。
+- 高德 Web 服务 Key 缺失、平台类型错误、IP 白名单或额度限制时，真实地点模式会返回可解释失败，不会跨城生成错误路线。无明确地点的演示场景仍可使用本地 RAG。
+- 高德 `USERKEY_PLAT_NOMATCH` 表示后端误用了“Web端(JS API)”Key；`AMAP_WEB_SERVICE_KEY` 必须使用“Web服务”Key。
 - 不允许通过自动登录、抓 cookie 或爬取个人账号方式获取真实画像。
