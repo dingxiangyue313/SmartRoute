@@ -165,3 +165,4 @@ class RouteIntentResult(BaseModel):
     detected_slots: dict[str, Any] = Field(default_factory=dict)
     planning_query: str
     source: str = "rules"
+    clarification_question: str | None = None

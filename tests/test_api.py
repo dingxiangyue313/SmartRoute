@@ -544,8 +544,25 @@ def test_route_intent_rules_fallback(monkeypatch):
     assert known_landmark.json()["detected_slots"]["location"] == "万象天地"
     assert arbitrary_anchor.json()["action"] == "open_plugin"
     assert arbitrary_anchor.json()["detected_slots"]["location"] == "三里屯"
-    assert medium.json()["action"] == "ask_confirm"
+    assert medium.json()["action"] == "ask_clarification"
     assert low.json()["action"] == "normal_answer"
+
+
+def test_route_intent_asks_clarification_for_ambiguous_local_life(monkeypatch):
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    load_agents.cache_clear()
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/route-intent",
+        json={"query": "中国美术馆附近逛街、吃饭", "source": "xiaotuan"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["action"] == "ask_clarification"
+    assert payload["clarification_question"]
+    assert "推荐" in payload["clarification_question"]
 
 
 def test_feedback_api_updates_profile():

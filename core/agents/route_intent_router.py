@@ -38,9 +38,10 @@ class RouteIntentRouterAgent:
         if self.api_key:
             llm_result = self._route_with_llm(text, source, context or {})
             if llm_result:
-                return llm_result
+                return self._apply_clarification_if_needed(text, llm_result)  # [NEW]
 
-        return self._route_with_rules(text, source, context or {})
+        rules_result = self._route_with_rules(text, source, context or {})
+        return self._apply_clarification_if_needed(text, rules_result)  # [NEW]
 
     def _route_with_llm(
         self,
@@ -192,8 +193,72 @@ class RouteIntentRouterAgent:
             }
         )
 
+    def _apply_clarification_if_needed(self, query: str, result: RouteIntentResult) -> RouteIntentResult:
+        # [NEW] Low-confidence route-ish requests should ask instead of guessing.
+        if not self._needs_clarification(query, result):
+            return result
+
+        question = self._generate_clarification_question(query, result)
+        return RouteIntentResult(
+            action="ask_clarification",
+            confidence=result.confidence,
+            reason=f"需要确认：{question}",
+            detected_slots=result.detected_slots,
+            planning_query=query,
+            source="clarification",
+            clarification_question=question,
+        )
+
+    def _needs_clarification(self, query: str, result: RouteIntentResult) -> bool:
+        # [NEW] Keep confident decisions unchanged.
+        if result.confidence >= 0.7:
+            return False
+        if result.action in {"open_plugin", "ask_confirm"}:
+            return True
+        if result.action == "normal_answer":
+            return self._looks_like_ambiguous_local_life_query(query, result)
+        return False
+
+    def _looks_like_ambiguous_local_life_query(self, query: str, result: RouteIntentResult) -> bool:
+        # [NEW] Catch cases such as "中国美术馆附近逛街、吃饭" without changing core rules.
+        if result.detected_slots.get("location"):
+            return True
+        single_poi_terms = ["电话", "地址", "营业", "几点开", "优惠", "券", "菜单", "评分"]
+        if any(term in query for term in single_poi_terms):
+            return False
+        location_terms = ["附近", "周边", "这里", "那边"]
+        local_life_terms = [
+            "推荐",
+            "好吃",
+            "好玩",
+            "吃饭",
+            "晚饭",
+            "午饭",
+            "逛街",
+            "逛逛",
+            "玩",
+            "咖啡",
+            "下午茶",
+            "餐厅",
+            "商场",
+            "看展",
+            "电影",
+        ]
+        return any(term in query for term in location_terms) and any(term in query for term in local_life_terms)
+
+    def _generate_clarification_question(self, query: str, result: RouteIntentResult) -> str:
+        # [NEW] Generate a user-facing confirmation question for ambiguous intent.
+        location = result.detected_slots.get("location")
+        if location:
+            return f"我注意到你想在{location}附近活动，你是想让我推荐几个地方，还是需要规划一条游玩路线？"
+
+        if any(word in query for word in ["推荐", "好吃", "好玩"]):
+            return "你是只想让我推荐几个地点，还是需要我把它们串成一条路线？"
+
+        return "你是想要地点推荐，还是需要规划出行路线？"
+
     def _normalize_action(self, action: Any) -> str:
-        if action in {"open_plugin", "ask_confirm", "normal_answer"}:
+        if action in {"open_plugin", "ask_confirm", "normal_answer", "ask_clarification"}:
             return str(action)
         return "normal_answer"
 

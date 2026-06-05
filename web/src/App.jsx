@@ -715,10 +715,11 @@ function XiaotuanScene({ scenario, routeIntent, onAsk, onOpen, loading }) {
           <h3>
             {routeIntent.action === "open_plugin" && "识别为路线规划需求"}
             {routeIntent.action === "ask_confirm" && "可能需要路线规划"}
+            {routeIntent.action === "ask_clarification" && "需要确认意图"}
             {routeIntent.action === "normal_answer" && "先按普通小团回答"}
           </h3>
           <p>{routeIntent.reason}</p>
-          {routeIntent.action === "ask_confirm" && (
+          {(routeIntent.action === "ask_confirm" || routeIntent.action === "ask_clarification") && (
             <div className="intent-actions">
               <button onClick={() => onOpen(routeIntent.planning_query)} disabled={loading}>排路线</button>
               <button>只看推荐</button>
