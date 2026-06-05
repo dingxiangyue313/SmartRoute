@@ -10,6 +10,22 @@ from openai import OpenAI
 from core.models import RouteIntentResult
 
 
+ACTIVITY_KEYWORDS = {
+    "餐饮": ["吃", "美食", "餐厅", "晚饭", "午饭", "火锅", "小吃", "烧烤", "brunch", "早午餐"],
+    "咖啡/茶饮": ["咖啡", "茶", "下午茶", "奶茶", "甜品"],
+    "景点": ["玩", "逛", "景点", "公园", "博物馆", "展", "拍照", "打卡", "citywalk"],
+    "娱乐": ["电影", "酒吧", "live", "演出", "密室", "ktv", "剧本杀", "夜游"],
+    "购物": ["商场", "购物", "买", "市集", "逛街"],
+}
+
+ROUTE_WORDS = ["路线", "规划", "安排", "串", "排一下", "怎么走", "怎么玩", "怎么逛", "逛吃", "吃完再", "饭后", "顺路", "一日游", "半天玩"]
+TIME_WORDS = ["上午", "下午", "晚上", "今晚", "今天", "明天", "周末", "半天", "一天"]
+COMPANION_WORDS = ["爸妈", "父母", "老人", "孩子", "亲子", "情侣", "朋友", "同事", "一家人"]
+CONSTRAINT_WORDS = ["预算", "人均", "便宜", "贵", "不排队", "少排队", "排队", "少走路", "轻松", "室内", "雨天", "打车", "公交", "地铁"]
+SINGLE_POI_WORDS = ["电话", "地址", "营业", "几点开", "几点关", "优惠", "券", "菜单", "评分", "停车", "外卖", "排号", "订座"]
+PLACE_SUFFIXES = "大学|学院|公园|商圈|中心|广场|景区|景点|天地|胡同|街|路|城|湾|寺|店|馆|园|站|村|镇|区"
+
+
 class RouteIntentRouterAgent:
     """Classify whether a XiaoTuan query should open SmartRoute."""
 
@@ -25,6 +41,7 @@ class RouteIntentRouterAgent:
         context: dict[str, Any] | None = None,
     ) -> RouteIntentResult:
         text = query.strip()
+        context = context or {}
         if not text:
             return RouteIntentResult(
                 action="normal_answer",
@@ -33,39 +50,55 @@ class RouteIntentRouterAgent:
                 detected_slots={},
                 planning_query=text,
                 source="rules",
+                intent_type="empty",
             )
 
-        if self.api_key:
-            llm_result = self._route_with_llm(text, source, context or {})
-            if llm_result:
-                return llm_result
-
-        return self._route_with_rules(text, source, context or {})
+        signals = self._extract_signals(text, source, context)
+        rules_result = self._route_with_rules(text, source, context, signals)
+        llm_result = self._route_with_llm(text, source, context, signals) if self.api_key else None
+        return self._fuse_results(text, rules_result, llm_result, signals)
 
     def _route_with_llm(
         self,
         query: str,
         source: str,
         context: dict[str, Any],
+        signals: dict[str, Any],
     ) -> RouteIntentResult | None:
         client = OpenAI(api_key=self.api_key, base_url=self.base_url, timeout=4.0)
         system_prompt = (
-            "你是美团小团 AI 的路线意图识别器。判断用户是否应该调起 SmartRoute 路线规划插件。"
+            "你是美团小团 AI 的路线意图识别器。你的任务是判断是否调起 SmartRoute 路线规划插件。"
             "只返回 JSON，不要返回 Markdown。action 只能是 open_plugin、ask_confirm、normal_answer。"
-            "open_plugin 表示明确要把多个本地生活 POI 串成路线；ask_confirm 表示可能需要路线但不明确；"
-            "normal_answer 表示普通问答、单店推荐、优惠、菜品、营业时间、电话或地址。"
+            "open_plugin: 用户明确需要把多个本地生活 POI 串成可执行路线，或有时长/多活动/顺路安排等强信号。"
+            "ask_confirm: 用户有本地生活地点或活动需求，但缺少路线、时长、多活动等关键要素，需要先问一句确认。"
+            "normal_answer: 用户在问单店电话、地址、营业时间、菜单、优惠、评分、停车、外卖等信息。"
+            "如果要素不齐，不要硬开插件，优先 ask_confirm 并给出缺失字段。"
         )
+        examples = [
+            {"query": "中山大学玩3小时", "action": "open_plugin", "intent_type": "route_plan", "anchor_text": "中山大学"},
+            {"query": "带爸妈在金鱼胡同轻松逛半天", "action": "open_plugin", "intent_type": "route_plan", "anchor_text": "金鱼胡同"},
+            {"query": "万象天地有什么好玩的", "action": "ask_confirm", "intent_type": "local_recommendation", "anchor_text": "万象天地"},
+            {"query": "gaga营业到几点", "action": "normal_answer", "intent_type": "single_poi_info", "negative_reason": "营业时间查询"},
+        ]
         user_prompt = {
             "query": query,
             "source": source,
             "context": context,
+            "rule_signals": signals,
+            "few_shot_examples": examples,
             "required_schema": {
                 "action": "open_plugin|ask_confirm|normal_answer",
                 "confidence": "0到1的小数",
+                "intent_type": "route_plan|local_recommendation|single_poi_info|transaction|other",
                 "reason": "一句中文原因",
+                "anchor_text": "区域/地标/商户锚点或null",
+                "activities": ["餐饮/咖啡/景点/娱乐/购物等"],
+                "constraints": ["预算/排队/少走路/人群/交通等"],
+                "missing_slots": ["需要追问的关键字段"],
+                "negative_reason": "如果不应打开插件，写原因，否则null",
                 "detected_slots": {
                     "location": "区域/地点或空",
-                    "time": "时间窗口或空",
+                    "time": "时间窗口/时长或空",
                     "intent": "路线/推荐/优惠/营业信息等",
                     "constraints": ["预算/排队/少走路/人群等"],
                 },
@@ -82,15 +115,21 @@ class RouteIntentRouterAgent:
                 temperature=0,
                 response_format={"type": "json_object"},
             )
-            content = response.choices[0].message.content or "{}"
-            payload = json.loads(content)
+            payload = json.loads(response.choices[0].message.content or "{}")
             result = RouteIntentResult(
                 action=self._normalize_action(payload.get("action")),
-                confidence=float(payload.get("confidence", 0.0)),
+                confidence=self._safe_float(payload.get("confidence"), 0.0),
                 reason=str(payload.get("reason") or "LLM 判断完成"),
                 detected_slots=payload.get("detected_slots") if isinstance(payload.get("detected_slots"), dict) else {},
                 planning_query=str(payload.get("planning_query") or query),
                 source="llm",
+                intent_type=str(payload.get("intent_type") or ""),
+                anchor_text=self._clean_optional(payload.get("anchor_text")),
+                activities=self._string_list(payload.get("activities")),
+                constraints=self._string_list(payload.get("constraints")),
+                negative_reason=self._clean_optional(payload.get("negative_reason")),
+                rule_signals=signals,
+                llm_judgement=self._safe_payload(payload),
             )
             return self._sanitize_result(result, query)
         except Exception:
@@ -101,81 +140,166 @@ class RouteIntentRouterAgent:
         query: str,
         source: str,
         context: dict[str, Any],
+        signals: dict[str, Any],
     ) -> RouteIntentResult:
-        location_hits = self._extract_location_hits(query)
-        time_hit = bool(re.search(r"(上午|下午|晚上|今晚|明天|周末|半天|一天|\d+\s*(?:个)?小时|\d{1,2}\s*点)", query))
-        duration_hit = bool(re.search(r"(半天|一天|\d+\s*(?:个)?小时)", query))
-        nearby_location_hit = bool(location_hits) or bool(re.search(r"(?:想去|要去|我去|去|到|在)?\s*([\u4e00-\u9fffA-Za-z0-9·]{2,24})(?:附近|周边)", query))
-        route_hit = any(word in query for word in ["路线", "规划", "安排", "串", "怎么走", "怎么玩", "半天玩", "一日游", "吃完再", "逛逛"])
-        local_life_hit = any(
-            word in query
-            for word in [
-                "吃",
-                "玩",
-                "逛",
-                "咖啡",
-                "下午茶",
-                "餐厅",
-                "展",
-                "景点",
-                "电影",
-                "酒吧",
-                "市集",
-                "商场",
-                "外滩",
-                "深圳大学",
-                "深大",
-                "科技园",
-                "深圳湾",
-                "万象天地",
-                "海岸城",
-                "欢乐海岸",
-                "车公庙",
-            ]
+        strong_route = (
+            signals["route_hit"]
+            or signals["duration_hit"]
+            or signals["multi_activity_hit"]
+            or signals["pinned_context_hit"]
+            or signals["continuation_context_hit"]
         )
-        constraints = [word for word in ["预算", "人均", "不排队", "少排队", "少走路", "爸妈", "老人", "孩子", "情侣"] if word in query]
-        single_poi_hit = any(word in query for word in ["电话", "地址", "营业", "几点开", "优惠", "券", "菜单", "评分"])
+        local_need = signals["local_life_hit"] or bool(signals["locations"]) or signals["has_context_anchor"]
+        has_location_context = bool(signals["locations"]) or signals["has_context_anchor"] or signals["pinned_context_hit"] or signals["continuation_context_hit"]
+        single_info = signals["single_poi_hit"] and not (signals["route_hit"] or signals["multi_activity_hit"] or signals["duration_hit"])
 
-        if single_poi_hit and not route_hit:
+        if single_info:
             action = "normal_answer"
             confidence = 0.18
             reason = "用户更像在问单店信息或交易信息，不应默认打开路线插件"
-        elif duration_hit and nearby_location_hit and local_life_hit:
+            intent_type = "single_poi_info"
+            negative_reason = "单店信息查询"
+        elif strong_route and local_need and has_location_context:
             action = "open_plugin"
-            confidence = 0.88
-            reason = "用户给出了明确地点、附近范围和游玩时长，适合直接调起路线规划插件"
-        elif route_hit and (location_hits or nearby_location_hit or time_hit or local_life_hit):
-            action = "open_plugin"
-            confidence = 0.88
-            reason = "用户表达了区域/时间/吃喝玩乐目标，并带有路线或安排意图"
-        elif duration_hit and location_hits and local_life_hit:
-            action = "open_plugin"
-            confidence = 0.84
-            reason = "用户给出了明确区域和时长，适合直接调起路线规划插件"
-        elif (location_hits or time_hit) and local_life_hit:
+            confidence = 0.9 if signals["duration_hit"] or signals["multi_activity_hit"] else 0.84
+            reason = "用户表达了地点/活动/时长/顺路安排等路线强信号，适合直接调起路线规划插件"
+            intent_type = "route_plan"
+            negative_reason = None
+        elif local_need:
             action = "ask_confirm"
             confidence = 0.62
-            reason = "用户有本地生活出行需求，但还没有明确要求串联成路线"
+            reason = "用户有本地生活需求，但路线目标、时长或多站安排还不完整，需要先确认"
+            intent_type = "local_recommendation"
+            negative_reason = None
         else:
             action = "normal_answer"
             confidence = 0.25
             reason = "当前问题更适合由小团普通问答处理"
+            intent_type = "other"
+            negative_reason = "缺少本地生活路线信号"
 
+        missing_slots = self._missing_slots_for(action, signals)
         return RouteIntentResult(
             action=action,
             confidence=confidence,
             reason=reason,
             detected_slots={
-                "location": "、".join(location_hits),
-                "time": "已识别" if time_hit else "",
+                "location": "、".join(signals["locations"]),
+                "time": "已识别" if signals["time_hit"] else "",
                 "intent": "路线规划" if action == "open_plugin" else "可能路线" if action == "ask_confirm" else "普通问答",
-                "constraints": constraints,
+                "activities": signals["activities"],
+                "constraints": signals["constraints"],
+                "missing_slots": missing_slots,
                 "source_entry": source,
                 "context_keys": list(context.keys()),
             },
             planning_query=self._build_planning_query(query, action),
             source="rules",
+            intent_type=intent_type,
+            anchor_text=signals["locations"][0] if signals["locations"] else None,
+            activities=signals["activities"],
+            constraints=signals["constraints"],
+            negative_reason=negative_reason,
+            rule_signals=signals,
         )
+
+    def _fuse_results(
+        self,
+        query: str,
+        rules_result: RouteIntentResult,
+        llm_result: RouteIntentResult | None,
+        signals: dict[str, Any],
+    ) -> RouteIntentResult:
+        if llm_result is None:
+            return rules_result.model_copy(update={"fusion": {"strategy": "rules_only", "final_action": rules_result.action}})
+
+        single_info = signals["single_poi_hit"] and not (signals["route_hit"] or signals["multi_activity_hit"] or signals["duration_hit"])
+        strong_route = (
+            signals["route_hit"]
+            or signals["duration_hit"]
+            or signals["multi_activity_hit"]
+            or signals["pinned_context_hit"]
+            or signals["continuation_context_hit"]
+        )
+        local_need = signals["local_life_hit"] or bool(signals["locations"]) or signals["has_context_anchor"]
+        has_location_context = bool(signals["locations"]) or signals["has_context_anchor"] or signals["pinned_context_hit"] or signals["continuation_context_hit"]
+
+        chosen = llm_result
+        strategy = "llm_primary"
+        if single_info:
+            chosen = rules_result
+            strategy = "rules_guardrail_single_poi"
+        elif strong_route and local_need and has_location_context and llm_result.action != "open_plugin":
+            chosen = rules_result
+            strategy = "rules_override_route_signal"
+        elif llm_result.action == "open_plugin" and not has_location_context:
+            chosen = rules_result
+            strategy = "rules_guardrail_missing_location"
+        elif rules_result.action == "ask_confirm" and llm_result.action == "normal_answer" and local_need:
+            chosen = rules_result
+            strategy = "rules_guardrail_local_need"
+
+        confidence = max(chosen.confidence, rules_result.confidence if chosen.action == rules_result.action else chosen.confidence)
+        result = chosen.model_copy(
+            update={
+                "confidence": min(0.96, confidence),
+                "rule_signals": signals,
+                "llm_judgement": llm_result.llm_judgement,
+                "fusion": {
+                    "strategy": strategy,
+                    "rules_action": rules_result.action,
+                    "llm_action": llm_result.action,
+                    "final_action": chosen.action,
+                    "conflict": rules_result.action != llm_result.action,
+                },
+            }
+        )
+        if not result.anchor_text and rules_result.anchor_text:
+            result = result.model_copy(update={"anchor_text": rules_result.anchor_text})
+        return self._sanitize_result(result, query)
+
+    def _extract_signals(self, query: str, source: str, context: dict[str, Any]) -> dict[str, Any]:
+        activities = [name for name, words in ACTIVITY_KEYWORDS.items() if any(word.lower() in query.lower() for word in words)]
+        constraints = [word for word in CONSTRAINT_WORDS + COMPANION_WORDS if word in query]
+        locations = self._extract_location_hits(query, context)
+        time_hit = bool(re.search(r"(上午|下午|晚上|今晚|今天|明天|周末|半天|一天|\d+\s*(?:个)?小时|\d{1,2}\s*点)", query))
+        duration_hit = bool(re.search(r"(半天|一天|\d+\s*(?:个)?小时)", query))
+        route_hit = any(word in query for word in ROUTE_WORDS)
+        local_life_hit = bool(activities) or any(word in query for word in ["附近", "周边", "去哪", "好玩", "推荐"])
+        single_poi_hit = any(word in query for word in SINGLE_POI_WORDS)
+        multi_activity_hit = self._has_multi_activity(query, activities)
+        pinned_context_hit = source in {"favorites", "favorite"} or bool(context.get("selected_pois"))
+        continuation_context_hit = source in {"detail", "poi_detail"} or any(word in query for word in ["从这", "从这里", "这家店", "下一站", "后面"])
+        return {
+            "locations": locations,
+            "time_hit": time_hit,
+            "duration_hit": duration_hit,
+            "route_hit": route_hit,
+            "local_life_hit": local_life_hit,
+            "single_poi_hit": single_poi_hit,
+            "multi_activity_hit": multi_activity_hit,
+            "pinned_context_hit": pinned_context_hit,
+            "continuation_context_hit": continuation_context_hit,
+            "has_context_anchor": bool(context.get("anchor_text") or context.get("anchor_location")),
+            "activities": activities,
+            "constraints": constraints,
+            "source_entry": source,
+        }
+
+    def _has_multi_activity(self, query: str, activities: list[str]) -> bool:
+        return len(activities) >= 2 or any(word in query for word in ["再", "然后", "+", "和", "逛吃", "饭后", "吃完"])
+
+    def _missing_slots_for(self, action: str, signals: dict[str, Any]) -> list[str]:
+        if action == "normal_answer":
+            return []
+        missing: list[str] = []
+        if not signals["locations"] and not signals["has_context_anchor"]:
+            missing.append("地点/区域")
+        if not signals["time_hit"]:
+            missing.append("时间/时长")
+        if not signals["activities"]:
+            missing.append("想吃/玩/逛的类型")
+        return missing[:3]
 
     def _sanitize_result(self, result: RouteIntentResult, fallback_query: str) -> RouteIntentResult:
         action = self._normalize_action(result.action)
@@ -184,10 +308,18 @@ class RouteIntentRouterAgent:
             action = "ask_confirm"
         if action == "normal_answer" and confidence > 0.68:
             confidence = 0.68
+        detected_slots = dict(result.detected_slots or {})
+        if result.anchor_text and not detected_slots.get("location"):
+            detected_slots["location"] = result.anchor_text
+        if result.activities and not detected_slots.get("activities"):
+            detected_slots["activities"] = result.activities
+        if result.constraints and not detected_slots.get("constraints"):
+            detected_slots["constraints"] = result.constraints
         return result.model_copy(
             update={
                 "action": action,
                 "confidence": confidence,
+                "detected_slots": detected_slots,
                 "planning_query": result.planning_query.strip() or fallback_query,
             }
         )
@@ -197,43 +329,33 @@ class RouteIntentRouterAgent:
             return str(action)
         return "normal_answer"
 
-    def _extract_location_hits(self, query: str) -> list[str]:
-        candidates = [
-            "外滩",
-            "豫园",
-            "南京路",
-            "陆家嘴",
-            "徐家汇",
-            "武康路",
-            "静安寺",
-            "愚园路",
-            "大学路",
-            "虹桥",
-            "深圳大学",
-            "深大",
-            "科技园",
-            "深圳湾",
-            "金地威新",
-            "南山",
-            "福田",
-            "中山大学",
-            "万象天地",
-            "海岸城",
-            "欢乐海岸",
-            "车公庙",
+    def _extract_location_hits(self, query: str, context: dict[str, Any] | None = None) -> list[str]:
+        hits: list[str] = []
+        context = context or {}
+        if context.get("anchor_text"):
+            hits.append(clean_location_text(str(context["anchor_text"])))
+
+        patterns = [
+            rf"(?:想去|要去|我要去|我想去|去|到|在)\s*([\u4e00-\u9fffA-Za-z0-9·]{{2,24}}?)(?:附近|周边|玩|逛|吃|轻松|有|推荐|怎么|半天|一天|\d+\s*(?:个)?小时|$)",
+            rf"([\u4e00-\u9fffA-Za-z0-9·]{{2,24}}(?:{PLACE_SUFFIXES}))(?:附近|周边|有|推荐|怎么|玩|逛|吃|轻松|半天|一天|\d+\s*(?:个)?小时|$)",
+            rf"(?:上午|下午|晚上|今晚|今天|明天|周末)?\s*([\u4e00-\u9fffA-Za-z0-9·]{{2,24}}?)(?:附近|周边)?(?:玩|逛|逛吃|吃饭|看展|看电影)\s*(?:半天|一天|\d+\s*(?:个)?小时)?",
         ]
-        hits = [item for item in candidates if item in query]
-        for pattern in [
-            r"(?:想去|要去|我要去|我想去|去|到|在)\s*([\u4e00-\u9fffA-Za-z0-9·]{2,24})(?:附近|周边)",
-            r"([\u4e00-\u9fffA-Za-z0-9·]{2,24}(?:大学|学院|公园|商圈|中心|广场|景区|景点))(?:附近|周边)",
-            r"(?:我下午|今天|明天|周末|上午|下午|晚上|今晚)?(?:想去|要去|我要去|我想去|去|到|在)?\s*([\u4e00-\u9fffA-Za-z0-9·]{2,24})(?:附近|周边)?(?:玩|逛|吃|下午茶|看展|看电影)\s*(?:半天|一天|\d+\s*(?:个)?小时)",
-            r"(?:我下午|今天|明天|周末|上午|下午|晚上|今晚)?(?:想去|要去|我要去|我想去|去|到|在)?\s*([\u4e00-\u9fffA-Za-z0-9·]{2,24})\s*(?:半天|一天|\d+\s*(?:个)?小时)",
-        ]:
-            for match in re.finditer(pattern, query):
+        for pattern in patterns:
+            for match in re.finditer(pattern, query, flags=re.IGNORECASE):
                 location = clean_location_text(match.group(1))
-                if location and location not in hits:
+                if self._looks_like_location(location) and location not in hits:
                     hits.append(location)
-        return hits
+        return hits[:3]
+
+    def _looks_like_location(self, value: str) -> bool:
+        if not value or len(value) < 2:
+            return False
+        blocked = {"附近", "周边", "今天", "明天", "上午", "下午", "晚上", "今晚", "周末", "半天", "一天", "路线", "规划", "安排"}
+        if value in blocked:
+            return False
+        if any(word in value for word in ["什么", "怎么", "有没有", "多少", "几个", "小时", "今晚", "今天", "明天", "上午", "下午", "晚上", "几点"]):
+            return False
+        return True
 
     def _build_planning_query(self, query: str, action: str) -> str:
         if action == "normal_answer":
@@ -242,10 +364,42 @@ class RouteIntentRouterAgent:
             return query
         return f"{query}，帮我规划成一条可执行路线"
 
+    def _safe_float(self, value: Any, fallback: float) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return fallback
+
+    def _clean_optional(self, value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        cleaned = clean_location_text(value)
+        return cleaned or None
+
+    def _string_list(self, value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [str(item).strip() for item in value if str(item).strip()][:8]
+
+    def _safe_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        allowed = {
+            "action",
+            "confidence",
+            "intent_type",
+            "reason",
+            "anchor_text",
+            "activities",
+            "constraints",
+            "missing_slots",
+            "negative_reason",
+            "detected_slots",
+        }
+        return {key: payload.get(key) for key in allowed if key in payload}
+
 
 def clean_location_text(value: str) -> str:
     text = value.strip("，。,. 　")
-    prefixes = ["我要去", "我想去", "想去", "要去", "我去", "去", "到", "在", "我要", "我想", "想", "要"]
+    prefixes = ["我要去", "我想去", "想去", "要去", "我去", "去", "到", "在", "我要", "我想", "想", "要", "带爸妈在", "带父母在", "今晚在"]
     changed = True
     while changed:
         changed = False
@@ -253,5 +407,5 @@ def clean_location_text(value: str) -> str:
             if text.startswith(prefix) and len(text) > len(prefix) + 1:
                 text = text[len(prefix):].strip("，。,. 　")
                 changed = True
-    text = re.sub(r"(?:附近|周边)?(?:玩|逛|吃|下午茶|看展|看电影)$", "", text).strip("，。,. 　")
+    text = re.sub(r"(?:附近|周边)?(?:玩|逛|逛吃|吃|下午茶|看展|看电影|轻松)$", "", text).strip("，。,. 　")
     return text[:24]

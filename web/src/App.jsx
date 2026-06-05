@@ -714,10 +714,15 @@ function XiaotuanScene({ scenario, routeIntent, onAsk, onOpen, loading }) {
           <span>{routeIntent.source === "llm" ? "DeepSeek 意图识别" : "规则兜底识别"} · {(routeIntent.confidence * 100).toFixed(0)}%</span>
           <h3>
             {routeIntent.action === "open_plugin" && "识别为路线规划需求"}
-            {routeIntent.action === "ask_confirm" && "可能需要路线规划"}
+            {routeIntent.action === "ask_confirm" && "要不要排成路线？"}
             {routeIntent.action === "normal_answer" && "先按普通小团回答"}
           </h3>
           <p>{routeIntent.reason}</p>
+          {routeIntent.detected_slots?.missing_slots?.length > 0 && (
+            <div className="missing-slots">
+              还需要确认：{routeIntent.detected_slots.missing_slots.join("、")}
+            </div>
+          )}
           {routeIntent.action === "ask_confirm" && (
             <div className="intent-actions">
               <button onClick={() => onOpen(routeIntent.planning_query)} disabled={loading}>排路线</button>
@@ -1494,11 +1499,42 @@ function AgentPanel({
               <strong>{routeIntent.action}</strong>
               <span>{(routeIntent.confidence * 100).toFixed(0)}%</span>
               <p>{routeIntent.reason}</p>
+              {routeIntent.fusion?.strategy && (
+                <div className="intent-fusion">
+                  <b>最终融合</b>
+                  <span>{routeIntent.fusion.strategy}</span>
+                  {routeIntent.fusion.conflict && <em>LLM 与规则有分歧</em>}
+                </div>
+              )}
               <div className="hit-list">
-                {Object.entries(routeIntent.detected_slots || {}).slice(0, 4).map(([key, value]) => (
+                {Object.entries(routeIntent.detected_slots || {}).slice(0, 6).map(([key, value]) => (
                   <span key={key}>{key}: {Array.isArray(value) ? value.join("、") : value || "无"}</span>
                 ))}
               </div>
+              {routeIntent.rule_signals && (
+                <div className="intent-signal-grid">
+                  {[
+                    ["地点", routeIntent.rule_signals.locations?.join("、") || "未识别"],
+                    ["活动", routeIntent.rule_signals.activities?.join("、") || "未识别"],
+                    ["路线动词", routeIntent.rule_signals.route_hit ? "命中" : "未命中"],
+                    ["时长", routeIntent.rule_signals.duration_hit ? "命中" : "未命中"],
+                    ["多活动", routeIntent.rule_signals.multi_activity_hit ? "命中" : "未命中"],
+                    ["单店信息", routeIntent.rule_signals.single_poi_hit ? "命中" : "未命中"],
+                  ].map(([label, value]) => (
+                    <div key={label}>
+                      <span>{label}</span>
+                      <strong>{value}</strong>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {routeIntent.llm_judgement && (
+                <div className="intent-llm-box">
+                  <b>LLM 判断</b>
+                  <p>{routeIntent.llm_judgement.action || "unknown"} · {routeIntent.llm_judgement.intent_type || "未分类"}</p>
+                  {routeIntent.llm_judgement.negative_reason && <p>不调起原因：{routeIntent.llm_judgement.negative_reason}</p>}
+                </div>
+              )}
             </div>
           ) : (
             <div className="empty-state">小团输入后会先判断 open_plugin / ask_confirm / normal_answer。</div>

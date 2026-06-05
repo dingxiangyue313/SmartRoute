@@ -589,6 +589,18 @@ main {
   line-height: 1.5;
 }
 
+.missing-slots {
+  margin-top: 10px;
+  display: inline-flex;
+  max-width: 100%;
+  border-radius: 999px;
+  padding: 7px 10px;
+  background: rgba(255, 209, 0, 0.22);
+  color: #6d5300;
+  font-size: 12px;
+  font-weight: 900;
+}
+
 .intent-actions {
   margin-top: 12px;
   display: flex;
@@ -598,6 +610,75 @@ main {
 .intent-actions button + button {
   background: #fff;
   border: 1px solid #e2e2e2;
+}
+
+.intent-fusion,
+.intent-llm-box {
+  margin-top: 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 11px;
+  background: #fff;
+}
+
+.intent-fusion {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.intent-fusion b,
+.intent-llm-box b {
+  font-size: 12px;
+}
+
+.intent-fusion em {
+  border-radius: 999px;
+  padding: 4px 8px;
+  background: var(--yellow-soft);
+  color: #6d5300;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 900;
+}
+
+.intent-signal-grid {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.intent-signal-grid div {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  padding: 9px;
+  background: #fff;
+}
+
+.intent-signal-grid span {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.intent-signal-grid strong {
+  display: block;
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.intent-llm-box p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .mt-tabs {

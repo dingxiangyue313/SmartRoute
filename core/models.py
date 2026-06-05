@@ -165,3 +165,11 @@ class RouteIntentResult(BaseModel):
     detected_slots: dict[str, Any] = Field(default_factory=dict)
     planning_query: str
     source: str = "rules"
+    intent_type: str = ""
+    anchor_text: str | None = None
+    activities: list[str] = Field(default_factory=list)
+    constraints: list[str] = Field(default_factory=list)
+    negative_reason: str | None = None
+    rule_signals: dict[str, Any] = Field(default_factory=dict)
+    llm_judgement: dict[str, Any] | None = None
+    fusion: dict[str, Any] = Field(default_factory=dict)
