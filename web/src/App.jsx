@@ -680,8 +680,9 @@ function SearchScene({ scenario, onOpen, loading }) {
   );
 }
 
-function XiaotuanScene({ scenario, routeIntent, onAsk, onOpen, loading }) {
+function XiaotuanScene({ scenario, routeIntent, conversation, onAsk, onOpen, loading }) {
   const [draft, setDraft] = useState(scenario.query);
+  const hasMissingSlots = (routeIntent?.missing_slots?.length || routeIntent?.detected_slots?.missing_slots?.length || 0) > 0;
 
   useEffect(() => {
     setDraft(scenario.query);
@@ -699,8 +700,26 @@ function XiaotuanScene({ scenario, routeIntent, onAsk, onOpen, loading }) {
           onChange={(event) => setDraft(event.target.value)}
           placeholder="附近有什么好吃的？"
         />
-        <button onClick={() => onAsk(draft)} disabled={loading}>{loading ? "识别中" : "发送"}</button>
+        <button
+          onClick={() => {
+            onAsk(draft);
+            setDraft("");
+          }}
+          disabled={loading}
+        >
+          {loading ? "识别中" : "发送"}
+        </button>
       </div>
+      {conversation.length > 0 && (
+        <section className="xiaotuan-thread">
+          {conversation.slice(-6).map((item) => (
+            <div key={item.id} className={`xiaotuan-bubble ${item.role}`}>
+              <span>{item.role === "user" ? "你" : "小团"}</span>
+              <p>{item.text}</p>
+            </div>
+          ))}
+        </section>
+      )}
       <section className="mt-section">
         <h3>试试这样问</h3>
         <div className="xiaotuan-prompts">
@@ -723,9 +742,17 @@ function XiaotuanScene({ scenario, routeIntent, onAsk, onOpen, loading }) {
               还需要确认：{routeIntent.detected_slots.missing_slots.join("、")}
             </div>
           )}
-          {routeIntent.action === "ask_confirm" && (
+          {routeIntent.clarification_question && <p className="clarification-question">{routeIntent.clarification_question}</p>}
+          {routeIntent.clarification_options?.length > 0 && (
+            <div className="clarification-options">
+              {routeIntent.clarification_options.map((option) => (
+                <button key={option} onClick={() => onAsk(option, "chip")} disabled={loading}>{option}</button>
+              ))}
+            </div>
+          )}
+          {routeIntent.action === "ask_confirm" && !hasMissingSlots && (
             <div className="intent-actions">
-              <button onClick={() => onOpen(routeIntent.planning_query)} disabled={loading}>排路线</button>
+              <button onClick={() => onOpen(routeIntent.merged_query || routeIntent.planning_query)} disabled={loading}>排路线</button>
               <button>只看推荐</button>
             </div>
           )}
@@ -1211,6 +1238,7 @@ function PhoneExperience({
   routeView,
   loading,
   routeIntent,
+  xiaotuanConversation,
   onOpenRoute,
   onAskXiaotuan,
   profileMode,
@@ -1265,6 +1293,7 @@ function PhoneExperience({
           <XiaotuanScene
             scenario={scenario}
             routeIntent={routeIntent}
+            conversation={xiaotuanConversation}
             onAsk={onAskXiaotuan}
             onOpen={onOpenRoute}
             loading={loading}
@@ -1788,6 +1817,7 @@ export default function App() {
   const [activeScenarioId, setActiveScenarioId] = useState("search");
   const [phoneMode, setPhoneMode] = useState("entry");
   const [routeIntent, setRouteIntent] = useState(null);
+  const [xiaotuanConversation, setXiaotuanConversation] = useState([]);
   const [profileMode, setProfileMode] = useState("文艺体验型");
   const [profileSource, setProfileSource] = useState("preset");
   const [profileSources, setProfileSources] = useState(null);
@@ -1926,6 +1956,7 @@ export default function App() {
     setQuery(scenario.query);
     setActiveRouteContext(contextForScenario(scenario, scenario.query));
     setRouteIntent(null);
+    setXiaotuanConversation([]);
     setError("");
     setFeedbackStatus("");
     setReplacement(null);
@@ -1987,18 +2018,22 @@ export default function App() {
     }
   }
 
-  async function askXiaotuan(nextQuery) {
+  async function askXiaotuan(nextQuery, replyType = "free_text") {
     const trimmed = nextQuery.trim();
     if (!trimmed) return;
+    const previousIntent = routeIntent?.turn_state === "collecting_slots" ? routeIntent : null;
     setQuery(trimmed);
     setLoading(true);
     setLoadingLabel("小团识别中");
     setError("");
-    setRouteIntent(null);
+    setXiaotuanConversation((items) => [...items, { id: `u-${Date.now()}`, role: "user", text: trimmed }]);
     try {
       const payload = await postJson("/api/route-intent", {
         query: trimmed,
         source: "xiaotuan",
+        conversation_id: previousIntent?.conversation_id || null,
+        previous_intent: previousIntent,
+        user_reply_type: replyType,
         context: {
           entry: "问小团",
           current_city: inferCityHint(trimmed) || activeRouteContext?.city_hint || activeScenario.routeContext?.city_hint || APP_CURRENT_CITY,
@@ -2006,13 +2041,17 @@ export default function App() {
         },
       });
       setRouteIntent(payload);
+      const assistantText = payload.clarification_question
+        || (payload.action === "open_plugin" ? "信息已经补齐，我来帮你生成路线。" : payload.reason);
+      setXiaotuanConversation((items) => [...items, { id: `a-${Date.now()}`, role: "assistant", text: assistantText }]);
       if (payload.action === "open_plugin") {
-        const nextContext = contextForScenario(activeScenario, payload.planning_query || trimmed, {
+        const planningQuery = payload.merged_query || payload.planning_query || trimmed;
+        const nextContext = contextForScenario(activeScenario, planningQuery, {
           source: "xiaotuan",
-          city_hint: inferCityHint(payload.planning_query || trimmed) || activeRouteContext?.city_hint || activeScenario.routeContext?.city_hint || APP_CURRENT_CITY,
-          anchor_text: inferAnchorText(payload.planning_query || trimmed),
+          city_hint: inferCityHint(planningQuery) || activeRouteContext?.city_hint || activeScenario.routeContext?.city_hint || APP_CURRENT_CITY,
+          anchor_text: payload.filled_slots?.location || inferAnchorText(planningQuery),
         });
-        await requestPlanWithPreference(payload.planning_query || trimmed, nextContext, "规划中");
+        await requestPlanWithPreference(planningQuery, nextContext, "规划中");
       }
     } catch (err) {
       setError(err.message || "意图识别失败");
@@ -2159,6 +2198,7 @@ export default function App() {
           plan={plan}
           routeView={selectedRouteView}
           loading={loading}
+          xiaotuanConversation={xiaotuanConversation}
           routeIntent={routeIntent}
           onOpenRoute={(nextQuery, explicitContext) => {
             requestPlanWithPreference(nextQuery, explicitContext, "规划中");

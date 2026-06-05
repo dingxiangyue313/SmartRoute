@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import uuid
 from typing import Any
 
 from openai import OpenAI
@@ -13,7 +14,7 @@ from core.models import RouteIntentResult
 ACTIVITY_KEYWORDS = {
     "餐饮": ["吃", "美食", "餐厅", "晚饭", "午饭", "火锅", "小吃", "烧烤", "brunch", "早午餐"],
     "咖啡/茶饮": ["咖啡", "茶", "下午茶", "奶茶", "甜品"],
-    "景点": ["玩", "逛", "景点", "公园", "博物馆", "展", "拍照", "打卡", "citywalk"],
+    "景点": ["玩", "逛", "散步", "景点", "公园", "博物馆", "展", "拍照", "打卡", "citywalk"],
     "娱乐": ["电影", "酒吧", "live", "演出", "密室", "ktv", "剧本杀", "夜游"],
     "购物": ["商场", "购物", "买", "市集", "逛街"],
 }
@@ -39,9 +40,14 @@ class RouteIntentRouterAgent:
         query: str,
         source: str = "xiaotuan",
         context: dict[str, Any] | None = None,
+        previous_intent: RouteIntentResult | None = None,
+        conversation_id: str | None = None,
+        user_reply_type: str = "free_text",
     ) -> RouteIntentResult:
         text = query.strip()
         context = context or {}
+        conversation_id = conversation_id or previous_intent.conversation_id if previous_intent else conversation_id
+        conversation_id = conversation_id or f"xiaotuan-{uuid.uuid4().hex[:8]}"
         if not text:
             return RouteIntentResult(
                 action="normal_answer",
@@ -50,13 +56,24 @@ class RouteIntentRouterAgent:
                 detected_slots={},
                 planning_query=text,
                 source="rules",
+                conversation_id=conversation_id,
+                turn_state="new",
                 intent_type="empty",
             )
 
         signals = self._extract_signals(text, source, context)
         rules_result = self._route_with_rules(text, source, context, signals)
         llm_result = self._route_with_llm(text, source, context, signals) if self.api_key else None
-        return self._fuse_results(text, rules_result, llm_result, signals)
+        fused = self._fuse_results(text, rules_result, llm_result, signals)
+        return self._complete_slots(
+            query=text,
+            result=fused,
+            signals=signals,
+            context=context,
+            previous_intent=previous_intent,
+            conversation_id=conversation_id,
+            user_reply_type=user_reply_type,
+        )
 
     def _route_with_llm(
         self,
@@ -262,6 +279,7 @@ class RouteIntentRouterAgent:
         activities = [name for name, words in ACTIVITY_KEYWORDS.items() if any(word.lower() in query.lower() for word in words)]
         constraints = [word for word in CONSTRAINT_WORDS + COMPANION_WORDS if word in query]
         locations = self._extract_location_hits(query, context)
+        time_phrase = self._extract_time_phrase(query)
         time_hit = bool(re.search(r"(上午|下午|晚上|今晚|今天|明天|周末|半天|一天|\d+\s*(?:个)?小时|\d{1,2}\s*点)", query))
         duration_hit = bool(re.search(r"(半天|一天|\d+\s*(?:个)?小时)", query))
         route_hit = any(word in query for word in ROUTE_WORDS)
@@ -273,6 +291,7 @@ class RouteIntentRouterAgent:
         return {
             "locations": locations,
             "time_hit": time_hit,
+            "time_phrase": time_phrase,
             "duration_hit": duration_hit,
             "route_hit": route_hit,
             "local_life_hit": local_life_hit,
@@ -300,6 +319,210 @@ class RouteIntentRouterAgent:
         if not signals["activities"]:
             missing.append("想吃/玩/逛的类型")
         return missing[:3]
+
+    def _complete_slots(
+        self,
+        query: str,
+        result: RouteIntentResult,
+        signals: dict[str, Any],
+        context: dict[str, Any],
+        previous_intent: RouteIntentResult | None,
+        conversation_id: str,
+        user_reply_type: str,
+    ) -> RouteIntentResult:
+        if result.action == "normal_answer":
+            return result.model_copy(
+                update={
+                    "conversation_id": conversation_id,
+                    "turn_state": "normal_answer",
+                    "filled_slots": {},
+                    "missing_slots": [],
+                    "clarification_question": None,
+                    "clarification_options": [],
+                    "merged_query": query,
+                }
+            )
+
+        filled_slots = self._merge_filled_slots(query, signals, context, previous_intent)
+        missing_codes = self._missing_required_codes(filled_slots)
+        missing_labels = [self._slot_label(code) for code in missing_codes]
+        detected_slots = dict(result.detected_slots or {})
+        detected_slots["missing_slots"] = missing_labels
+        detected_slots["filled_slots"] = filled_slots
+
+        merged_query = self._build_merged_query(query, filled_slots, previous_intent)
+        should_open = not missing_codes and (
+            result.action == "open_plugin"
+            or user_reply_type in {"chip", "confirm_route"}
+            or (previous_intent is not None and previous_intent.action == "ask_confirm")
+        )
+        if should_open:
+            return result.model_copy(
+                update={
+                    "action": "open_plugin",
+                    "confidence": max(result.confidence, 0.86),
+                    "reason": "已补齐地点、时间和活动三类核心要素，可以调起 SmartRoute 生成路线。",
+                    "detected_slots": detected_slots,
+                    "planning_query": merged_query,
+                    "conversation_id": conversation_id,
+                    "turn_state": "ready_to_plan",
+                    "filled_slots": filled_slots,
+                    "missing_slots": [],
+                    "clarification_question": None,
+                    "clarification_options": [],
+                    "merged_query": merged_query,
+                    "anchor_text": filled_slots.get("location") or result.anchor_text,
+                    "activities": filled_slots.get("activities") or result.activities,
+                }
+            )
+
+        question = self._clarification_question(missing_codes, filled_slots)
+        return result.model_copy(
+            update={
+                "action": "ask_confirm",
+                "confidence": min(max(result.confidence, 0.58), 0.76),
+                "reason": self._clarification_reason(missing_codes),
+                "detected_slots": detected_slots,
+                "planning_query": merged_query,
+                "conversation_id": conversation_id,
+                "turn_state": "collecting_slots",
+                "filled_slots": filled_slots,
+                "missing_slots": missing_codes,
+                "clarification_question": question,
+                "clarification_options": self._clarification_options(missing_codes, context),
+                "merged_query": merged_query,
+                "anchor_text": filled_slots.get("location") or result.anchor_text,
+                "activities": filled_slots.get("activities") or result.activities,
+            }
+        )
+
+    def _merge_filled_slots(
+        self,
+        query: str,
+        signals: dict[str, Any],
+        context: dict[str, Any],
+        previous_intent: RouteIntentResult | None,
+    ) -> dict[str, Any]:
+        previous = dict(previous_intent.filled_slots or {}) if previous_intent else {}
+        context_location = self._location_from_context(context)
+        location = signals["locations"][0] if signals["locations"] else context_location or previous.get("location")
+        time_value = signals.get("time_phrase") or previous.get("time")
+        activities = signals["activities"] or previous.get("activities") or self._activities_from_context(context)
+        constraints = list(dict.fromkeys([*(previous.get("constraints") or []), *signals["constraints"]]))
+        optional = {
+            "party_type": self._first_hit(query, COMPANION_WORDS) or previous.get("party_type"),
+            "budget": self._extract_budget_phrase(query) or previous.get("budget"),
+            "queue_tolerance": self._first_hit(query, ["不排队", "少排队", "排队"]) or previous.get("queue_tolerance"),
+            "mobility": self._first_hit(query, ["少走路", "打车", "公交", "地铁", "步行"]) or previous.get("mobility"),
+        }
+        return {
+            "location": location or "",
+            "time": time_value or "",
+            "activities": activities if isinstance(activities, list) else [],
+            "constraints": constraints,
+            **{key: value for key, value in optional.items() if value},
+        }
+
+    def _missing_required_codes(self, filled_slots: dict[str, Any]) -> list[str]:
+        missing: list[str] = []
+        if not filled_slots.get("location"):
+            missing.append("location")
+        if not filled_slots.get("time"):
+            missing.append("time")
+        if not filled_slots.get("activities"):
+            missing.append("activities")
+        return missing
+
+    def _slot_label(self, code: str) -> str:
+        return {
+            "location": "地点/区域",
+            "time": "时间/时长",
+            "activities": "想吃/玩/逛的类型",
+        }.get(code, code)
+
+    def _clarification_reason(self, missing_codes: list[str]) -> str:
+        labels = [self._slot_label(code) for code in missing_codes[:2]]
+        return f"需要先确认{'、'.join(labels)}，补齐后才能生成更准确的路线。"
+
+    def _clarification_question(self, missing_codes: list[str], filled_slots: dict[str, Any]) -> str | None:
+        asking = missing_codes[:2]
+        if asking == ["location"]:
+            return "想在哪个区域安排？"
+        if asking == ["time"]:
+            return "大概安排多久，或者什么时候去？"
+        if asking == ["activities"]:
+            return "更想吃饭、咖啡、看展、逛街还是娱乐？"
+        parts = []
+        if "location" in asking:
+            parts.append("在哪个区域")
+        if "time" in asking:
+            parts.append("大概多久")
+        if "activities" in asking:
+            parts.append("想吃/玩/逛什么")
+        return "，".join(parts) + "？" if parts else None
+
+    def _clarification_options(self, missing_codes: list[str], context: dict[str, Any]) -> list[str]:
+        if not missing_codes:
+            return []
+        first = missing_codes[0]
+        if first == "location":
+            city = str(context.get("current_city") or context.get("city_hint") or "深圳")
+            if "北京" in city:
+                return ["金鱼胡同附近", "三里屯附近", "王府井附近"]
+            if "上海" in city:
+                return ["外滩附近", "静安寺附近", "徐家汇附近"]
+            return ["深圳大学附近", "万象天地附近", "车公庙附近"]
+        if first == "time":
+            return ["今晚3小时", "下午3小时", "半天"]
+        if first == "activities":
+            return ["吃饭+散步", "咖啡+看展", "逛街+晚餐", "娱乐+夜宵"]
+        return []
+
+    def _build_merged_query(self, query: str, filled_slots: dict[str, Any], previous_intent: RouteIntentResult | None) -> str:
+        parts = [
+            filled_slots.get("location", ""),
+            filled_slots.get("time", ""),
+            "、".join(filled_slots.get("activities", [])),
+            "、".join(filled_slots.get("constraints", [])),
+        ]
+        merged = "，".join(part for part in parts if part)
+        merged = re.sub(r"(，)+", "，", merged).strip("，。,. 　")
+        if not any(word in merged for word in ["路线", "规划", "安排"]):
+            merged = f"{merged}，帮我规划成一条可执行路线"
+        return merged
+
+    def _location_from_context(self, context: dict[str, Any]) -> str:
+        if context.get("anchor_text"):
+            return clean_location_text(str(context["anchor_text"]))
+        selected = context.get("selected_pois")
+        if isinstance(selected, list) and selected:
+            names = [str(item.get("name", "")).strip() for item in selected if isinstance(item, dict)]
+            if names:
+                return "、".join(names[:3])
+        return ""
+
+    def _activities_from_context(self, context: dict[str, Any]) -> list[str]:
+        selected = context.get("selected_pois")
+        if not isinstance(selected, list):
+            return []
+        categories = []
+        for item in selected:
+            if isinstance(item, dict) and item.get("category"):
+                categories.append(str(item["category"]))
+        return list(dict.fromkeys(categories))
+
+    def _extract_time_phrase(self, query: str) -> str:
+        matches = re.findall(r"(上午|下午|晚上|今晚|今天|明天|周末|半天|一天|\d+\s*(?:个)?小时|\d{1,2}\s*点)", query)
+        return "".join(matches[:3])
+
+    def _extract_budget_phrase(self, query: str) -> str:
+        match = re.search(r"(?:预算|人均)?\s*(\d{2,5})\s*(?:元|块|以内|左右)?", query)
+        if match and any(word in query for word in ["预算", "人均", "便宜", "贵", "元", "块"]):
+            return f"人均{match.group(1)}"
+        return ""
+
+    def _first_hit(self, query: str, words: list[str]) -> str:
+        return next((word for word in words if word in query), "")
 
     def _sanitize_result(self, result: RouteIntentResult, fallback_query: str) -> RouteIntentResult:
         action = self._normalize_action(result.action)

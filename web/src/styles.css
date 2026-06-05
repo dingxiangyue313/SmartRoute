@@ -551,6 +551,46 @@ main {
   font-weight: 950;
 }
 
+.xiaotuan-thread {
+  margin-top: 14px;
+  display: grid;
+  gap: 10px;
+}
+
+.xiaotuan-bubble {
+  max-width: 82%;
+  border-radius: 16px;
+  padding: 10px 12px;
+  background: #fff;
+  border: 1px solid var(--line);
+}
+
+.xiaotuan-bubble.user {
+  justify-self: end;
+  background: var(--yellow);
+  border-color: #e7bd00;
+}
+
+.xiaotuan-bubble.assistant {
+  justify-self: start;
+  background: #f8f8f8;
+}
+
+.xiaotuan-bubble span {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.xiaotuan-bubble p {
+  margin: 0;
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
 .xiaotuan-prompts {
   display: grid;
 }
@@ -599,6 +639,31 @@ main {
   color: #6d5300;
   font-size: 12px;
   font-weight: 900;
+}
+
+.clarification-question {
+  margin-top: 10px !important;
+  color: var(--ink) !important;
+  font-weight: 900;
+}
+
+.clarification-options {
+  margin-top: 11px;
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.clarification-options button {
+  flex: 0 0 auto;
+  border: 1px solid #e4c000;
+  background: var(--yellow);
+  color: var(--ink);
+  border-radius: 999px;
+  padding: 8px 11px;
+  font-size: 12px;
+  font-weight: 950;
 }
 
 .intent-actions {

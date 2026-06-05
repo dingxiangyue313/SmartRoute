@@ -567,6 +567,66 @@ def test_route_intent_rules_fallback(monkeypatch):
     assert low_menu.json()["action"] == "normal_answer"
 
 
+def test_route_intent_multi_turn_slot_completion(monkeypatch):
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    load_agents.cache_clear()
+    client = TestClient(app)
+
+    first = client.post(
+        "/api/route-intent",
+        json={"query": "今晚想吃饭再找个地方散步，不想排队", "source": "xiaotuan"},
+    )
+
+    assert first.status_code == 200
+    first_payload = first.json()
+    assert first_payload["action"] == "ask_confirm"
+    assert first_payload["turn_state"] == "collecting_slots"
+    assert first_payload["missing_slots"] == ["location"]
+    assert first_payload["clarification_question"] == "想在哪个区域安排？"
+
+    second = client.post(
+        "/api/route-intent",
+        json={
+            "query": "深圳大学附近，3小时",
+            "source": "xiaotuan",
+            "conversation_id": first_payload["conversation_id"],
+            "previous_intent": first_payload,
+        },
+    )
+
+    assert second.status_code == 200
+    second_payload = second.json()
+    assert second_payload["action"] == "open_plugin"
+    assert second_payload["turn_state"] == "ready_to_plan"
+    assert second_payload["missing_slots"] == []
+    assert second_payload["filled_slots"]["location"] == "深圳大学"
+    assert second_payload["filled_slots"]["time"] == "3小时"
+    assert "餐饮" in second_payload["filled_slots"]["activities"]
+    assert "景点" in second_payload["filled_slots"]["activities"]
+    assert "深圳大学" in second_payload["merged_query"]
+    assert "3小时" in second_payload["merged_query"]
+
+
+def test_route_intent_context_does_not_repeat_location_question(monkeypatch):
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    load_agents.cache_clear()
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/route-intent",
+        json={
+            "query": "安排晚饭前后顺路可逛的路线，少走路",
+            "source": "poi_detail",
+            "context": {"anchor_text": "gaga金地威新中心店", "current_city": "深圳"},
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert "location" not in payload["missing_slots"]
+    assert payload["filled_slots"]["location"] == "gaga金地威新中心店"
+
+
 def test_feedback_api_updates_profile():
     client = TestClient(app)
     plan_response = client.post(

@@ -67,6 +67,9 @@ class RouteIntentRequest(BaseModel):
     query: str = Field(min_length=1)
     source: str = "xiaotuan"
     context: dict[str, Any] = Field(default_factory=dict)
+    conversation_id: str | None = None
+    previous_intent: RouteIntentResult | None = None
+    user_reply_type: Literal["free_text", "chip", "confirm_route", "skip"] = "free_text"
 
 
 class CandidateView(BaseModel):
@@ -1803,6 +1806,9 @@ def route_intent(request: RouteIntentRequest) -> RouteIntentResult:
         request.query,
         source=request.source,
         context=request.context,
+        previous_intent=request.previous_intent,
+        conversation_id=request.conversation_id,
+        user_reply_type=request.user_reply_type,
     )
 
 
