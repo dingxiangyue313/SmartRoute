@@ -534,8 +534,17 @@ def test_route_intent_rules_fallback(monkeypatch):
     high = client.post("/api/route-intent", json={"query": "我下午要去外滩玩3个小时", "source": "xiaotuan"})
     known_landmark = client.post("/api/route-intent", json={"query": "万象天地玩3小时", "source": "xiaotuan"})
     arbitrary_anchor = client.post("/api/route-intent", json={"query": "三里屯逛2小时", "source": "xiaotuan"})
+    family = client.post("/api/route-intent", json={"query": "带爸妈在金鱼胡同轻松逛半天", "source": "xiaotuan"})
+    multi_activity = client.post("/api/route-intent", json={"query": "今晚三里屯吃饭再看电影", "source": "xiaotuan"})
+    mixed = client.post("/api/route-intent", json={"query": "万象天地逛吃一下安排3小时", "source": "xiaotuan"})
     medium = client.post("/api/route-intent", json={"query": "外滩下午有什么好玩的", "source": "xiaotuan"})
+    medium_landmark = client.post("/api/route-intent", json={"query": "万象天地有什么好玩的", "source": "xiaotuan"})
+    missing_time = client.post("/api/route-intent", json={"query": "中国美术馆附近逛街、吃饭", "source": "xiaotuan"})
+    missing_location = client.post("/api/route-intent", json={"query": "今晚想吃饭再找个地方散步，不想排队", "source": "xiaotuan"})
     low = client.post("/api/route-intent", json={"query": "这家店电话是多少", "source": "xiaotuan"})
+    low_hours = client.post("/api/route-intent", json={"query": "gaga营业到几点", "source": "xiaotuan"})
+    low_coupon = client.post("/api/route-intent", json={"query": "有没有优惠券", "source": "xiaotuan"})
+    low_menu = client.post("/api/route-intent", json={"query": "菜单有什么推荐", "source": "xiaotuan"})
 
     assert high.status_code == 200
     assert high.json()["action"] == "open_plugin"
@@ -544,25 +553,22 @@ def test_route_intent_rules_fallback(monkeypatch):
     assert known_landmark.json()["detected_slots"]["location"] == "万象天地"
     assert arbitrary_anchor.json()["action"] == "open_plugin"
     assert arbitrary_anchor.json()["detected_slots"]["location"] == "三里屯"
-    assert medium.json()["action"] == "ask_clarification"
+    assert family.json()["action"] == "open_plugin"
+    assert family.json()["detected_slots"]["location"] == "金鱼胡同"
+    assert multi_activity.json()["action"] == "open_plugin"
+    assert mixed.json()["action"] == "open_plugin"
+    assert medium.json()["action"] == "ask_confirm"
+    assert medium_landmark.json()["action"] == "ask_confirm"
+    assert medium_landmark.json()["detected_slots"]["location"] == "万象天地"
+    assert missing_time.json()["action"] == "ask_confirm"
+    assert "time" in missing_time.json()["detected_slots"]["missing_slots"]
+    assert missing_time.json()["follow_up_question"]
+    assert missing_location.json()["action"] == "ask_confirm"
+    assert "location" in missing_location.json()["detected_slots"]["missing_slots"]
     assert low.json()["action"] == "normal_answer"
-
-
-def test_route_intent_asks_clarification_for_ambiguous_local_life(monkeypatch):
-    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
-    load_agents.cache_clear()
-    client = TestClient(app)
-
-    response = client.post(
-        "/api/route-intent",
-        json={"query": "中国美术馆附近逛街、吃饭", "source": "xiaotuan"},
-    )
-
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["action"] == "ask_clarification"
-    assert payload["clarification_question"]
-    assert "推荐" in payload["clarification_question"]
+    assert low_hours.json()["action"] == "normal_answer"
+    assert low_coupon.json()["action"] == "normal_answer"
+    assert low_menu.json()["action"] == "normal_answer"
 
 
 def test_feedback_api_updates_profile():
