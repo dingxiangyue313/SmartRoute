@@ -609,11 +609,8 @@ class RouteIntentRouterAgent:
         return "normal_answer"
 
     def _extract_location_hits(self, query: str, context: dict[str, Any] | None = None) -> list[str]:
-        hits: list[str] = []
+        query_hits: list[str] = []
         context = context or {}
-        if context.get("anchor_text"):
-            hits.append(clean_location_text(str(context["anchor_text"])))
-
         patterns = [
             rf"(?:想去|要去|我要去|我想去|去|到|在)\s*([\u4e00-\u9fffA-Za-z0-9·]{{2,24}}?)(?:附近|周边|玩|逛|吃|轻松|有|推荐|怎么|半天|一天|\d+\s*(?:个)?小时|$)",
             rf"([\u4e00-\u9fffA-Za-z0-9·]{{2,24}}(?:{PLACE_SUFFIXES}))(?:附近|周边|有|推荐|怎么|玩|逛|吃|轻松|半天|一天|\d+\s*(?:个)?小时|$)",
@@ -622,8 +619,16 @@ class RouteIntentRouterAgent:
         for pattern in patterns:
             for match in re.finditer(pattern, query, flags=re.IGNORECASE):
                 location = clean_location_text(match.group(1))
-                if self._looks_like_location(location) and location not in hits:
-                    hits.append(location)
+                if self._looks_like_location(location) and location not in query_hits:
+                    query_hits.append(location)
+        if query_hits:
+            return query_hits[:3]
+
+        hits: list[str] = []
+        if context.get("anchor_text"):
+            context_anchor = clean_location_text(str(context["anchor_text"]))
+            if self._looks_like_location(context_anchor):
+                hits.append(context_anchor)
         return hits[:3]
 
     def _looks_like_location(self, value: str) -> bool:
@@ -632,7 +637,36 @@ class RouteIntentRouterAgent:
         blocked = {"附近", "周边", "今天", "明天", "上午", "下午", "晚上", "今晚", "周末", "半天", "一天", "路线", "规划", "安排"}
         if value in blocked:
             return False
-        if any(word in value for word in ["什么", "怎么", "有没有", "多少", "几个", "小时", "今晚", "今天", "明天", "上午", "下午", "晚上", "几点"]):
+        non_location_words = [
+            "什么",
+            "怎么",
+            "有没有",
+            "多少",
+            "几个",
+            "小时",
+            "今晚",
+            "今天",
+            "明天",
+            "上午",
+            "下午",
+            "晚上",
+            "几点",
+            "少走路",
+            "不排队",
+            "少排队",
+            "排队",
+            "散步",
+            "吃饭",
+            "喝点",
+            "咖啡",
+            "看展",
+            "逛街",
+            "娱乐",
+            "路线",
+            "规划",
+            "安排",
+        ]
+        if any(word in value for word in non_location_words):
             return False
         return True
 

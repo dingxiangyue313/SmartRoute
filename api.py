@@ -890,6 +890,14 @@ def resolve_route_anchor(
     amap_client: AMapClient,
 ) -> AMapAnchor | None:
     city_hint = city_hint_from(query, intent, route_context)
+    if selected_pois and route_context and route_context.source in {"favorites", "favorite"}:
+        first = selected_pois[0]
+        return AMapAnchor(
+            text=first.name,
+            city=normalize_city_hint(first.district) or city_hint,
+            location=GeoPoint(latitude=first.latitude, longitude=first.longitude),
+            source="selected_poi",
+        )
     anchor_text = extract_anchor_text(query, route_context)
     anchor_location = route_context.anchor_location if route_context else None
     anchor = amap_client.resolve_anchor(anchor_text, city_hint=city_hint, anchor_location=anchor_location)

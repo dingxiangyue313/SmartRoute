@@ -1065,6 +1065,29 @@ def test_route_intent_context_does_not_repeat_location_question(monkeypatch):
     assert payload["filled_slots"]["location"] == "gaga金地威新中心店"
 
 
+def test_route_intent_current_query_location_overrides_stale_context(monkeypatch):
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    load_agents.cache_clear()
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/route-intent",
+        json={
+            "query": "广州永庆坊附近逛3小时，想喝点东西，有文化点和散步地方",
+            "source": "xiaotuan",
+            "context": {"anchor_text": "深圳大学", "current_city": "深圳"},
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["action"] == "open_plugin"
+    assert payload["filled_slots"]["location"] == "广州永庆坊"
+    assert payload["anchor_text"] == "广州永庆坊"
+    assert "广州永庆坊" in payload["merged_query"]
+    assert "深圳大学" not in payload["merged_query"]
+
+
 def test_feedback_api_updates_profile():
     client = TestClient(app)
     plan_response = client.post(

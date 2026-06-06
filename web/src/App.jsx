@@ -941,6 +941,19 @@ function XiaotuanScene({ scenario, routeIntent, conversation, onAsk, onOpen, onF
 function FavoritesScene({ scenario, onOpen, loading }) {
   const [selectedIds, setSelectedIds] = useState(FAVORITE_POIS.slice(0, 3).map((item) => item.id));
   const selectedPois = FAVORITE_POIS.filter((item) => selectedIds.includes(item.id));
+  const primaryPoi = selectedPois[0] || null;
+  const selectedNames = selectedPois.map((poi) => poi.name).join("、");
+  const selectedCategoryText = [...new Set(selectedPois.map((poi) => poi.category))].join("、");
+  const favoriteQuery = selectedPois.length
+    ? `把我收藏的${selectedNames}安排成3小时路线，预算200，不想排队`
+    : scenario.query;
+  const favoriteContext = {
+    source: "favorites",
+    city_hint: inferCityHint(selectedPois.map((poi) => `${poi.address} ${poi.district} ${poi.name}`).join(" ")) || scenario.routeContext.city_hint,
+    anchor_text: primaryPoi?.name || null,
+    anchor_location: primaryPoi ? { latitude: primaryPoi.latitude, longitude: primaryPoi.longitude } : null,
+    selected_pois: selectedPois,
+  };
   function toggle(id) {
     setSelectedIds((items) => {
       if (items.includes(id)) return items.filter((item) => item !== id);
@@ -954,9 +967,9 @@ function FavoritesScene({ scenario, onOpen, loading }) {
       <div className="mt-tabs"><b>商户</b><span>团购</span><span>商品/菜品</span><span>内容</span></div>
       <SmartRouteEntryCard
         title={`已选择 ${selectedPois.length} 个收藏地点`}
-        text="按距离、营业时间、排队和预算，把收藏夹变成一条可执行路线；所选店铺会被优先保留。"
+        text={selectedPois.length ? `已选 ${selectedCategoryText}；所选店铺会被优先保留，再按距离、排队和预算补齐路线。` : "先选择 2-5 个收藏地点，再把收藏夹变成一条可执行路线。"}
         action="一键排路线"
-        onOpen={() => onOpen(scenario.query, { ...scenario.routeContext, selected_pois: selectedPois })}
+        onOpen={() => onOpen(favoriteQuery, favoriteContext)}
         loading={loading || selectedPois.length < 2}
       />
       <section className="mt-section">
@@ -1844,8 +1857,8 @@ function AgentPanel({
 
 function inferCityHint(text = "") {
   if (/(深圳|深大|深圳大学|科技园|南山|金地威新|gaga|万象天地)/i.test(text)) return "深圳";
-  if (/(北京|三里屯|朝阳|国贸)/.test(text)) return "北京";
-  if (/(广州|天河|珠江新城)/.test(text)) return "广州";
+  if (/(北京|三里屯|朝阳|国贸|金鱼胡同|王府井)/.test(text)) return "北京";
+  if (/(广州|天河|珠江新城|永庆坊|荔湾|北京路)/.test(text)) return "广州";
   if (/(上海|外滩|陆家嘴|南京东路|静安寺|豫园)/.test(text)) return "上海";
   return null;
 }
@@ -2255,6 +2268,15 @@ export default function App() {
     const previousIntent = xiaotuanPendingIntent
       || ((routeIntent?.turn_state === "collecting_slots" || routeIntent?.missing_slots?.length > 0) ? routeIntent : null);
     const previousQuery = previousIntent?.merged_query || previousIntent?.planning_query || "";
+    const currentAnchor = inferAnchorText(trimmed);
+    const previousLocation = previousIntent?.filled_slots?.location || null;
+    const contextAnchor = currentAnchor || previousLocation || null;
+    const contextCity = inferCityHint(trimmed)
+      || inferCityHint(currentAnchor || "")
+      || (previousIntent ? inferCityHint(previousQuery) : null)
+      || (previousIntent ? activeRouteContext?.city_hint : null)
+      || activeScenario.routeContext?.city_hint
+      || APP_CURRENT_CITY;
     setQuery(previousQuery || trimmed);
     setLoading(true);
     setLoadingLabel("小团识别中");
@@ -2269,12 +2291,8 @@ export default function App() {
         user_reply_type: replyType,
         context: {
           entry: "问小团",
-          current_city: inferCityHint(trimmed)
-            || inferCityHint(previousQuery)
-            || activeRouteContext?.city_hint
-            || activeScenario.routeContext?.city_hint
-            || APP_CURRENT_CITY,
-          anchor_text: previousIntent?.filled_slots?.location || activeRouteContext?.anchor_text || null,
+          current_city: contextCity,
+          anchor_text: contextAnchor,
           previous_filled_slots: previousIntent?.filled_slots || null,
           product: "meituan",
         },
@@ -2290,10 +2308,11 @@ export default function App() {
       setXiaotuanConversation((items) => [...items, { id: `a-${Date.now()}`, role: "assistant", text: assistantText }]);
       if (payload.action === "open_plugin") {
         const planningQuery = payload.merged_query || payload.planning_query || trimmed;
+        const plannedAnchor = payload.filled_slots?.location || inferAnchorText(planningQuery) || currentAnchor;
         const nextContext = contextForScenario(activeScenario, planningQuery, {
           source: "xiaotuan",
-          city_hint: inferCityHint(planningQuery) || activeRouteContext?.city_hint || activeScenario.routeContext?.city_hint || APP_CURRENT_CITY,
-          anchor_text: payload.filled_slots?.location || inferAnchorText(planningQuery),
+          city_hint: inferCityHint(planningQuery) || inferCityHint(plannedAnchor || "") || contextCity,
+          anchor_text: plannedAnchor,
         });
         setXiaotuanPendingIntent(null);
         const routePayload = await generatePlan(
@@ -2319,10 +2338,11 @@ export default function App() {
 
   async function openXiaotuanInlineRoute(nextQuery, explicitContext = null) {
     const planningQuery = nextQuery || routeIntent?.merged_query || routeIntent?.planning_query || query;
+    const plannedAnchor = routeIntent?.filled_slots?.location || inferAnchorText(planningQuery);
     const nextContext = contextForScenario(activeScenario, planningQuery, {
       source: "xiaotuan",
-      city_hint: inferCityHint(planningQuery) || activeRouteContext?.city_hint || activeScenario.routeContext?.city_hint || APP_CURRENT_CITY,
-      anchor_text: routeIntent?.filled_slots?.location || inferAnchorText(planningQuery),
+      city_hint: inferCityHint(planningQuery) || inferCityHint(plannedAnchor || "") || activeScenario.routeContext?.city_hint || APP_CURRENT_CITY,
+      anchor_text: plannedAnchor,
       ...(explicitContext || {}),
     });
     const routePayload = await generatePlan(
