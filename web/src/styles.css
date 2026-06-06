@@ -803,6 +803,31 @@ main {
   font-weight: 900;
 }
 
+.clarification-question {
+  margin-top: 10px !important;
+  color: var(--ink) !important;
+  font-weight: 900;
+}
+
+.clarification-options {
+  margin-top: 11px;
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.clarification-options button {
+  flex: 0 0 auto;
+  border: 1px solid #e4c000;
+  background: var(--yellow);
+  color: var(--ink);
+  border-radius: 999px;
+  padding: 8px 11px;
+  font-size: 12px;
+  font-weight: 950;
+}
+
 .intent-actions {
   margin-top: 12px;
   display: flex;
@@ -2245,11 +2270,39 @@ main {
 
 .adjust-composer {
   display: grid;
-  grid-template-columns: 1fr auto;
   gap: 8px;
   position: sticky;
   bottom: 0;
   z-index: 5;
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.96);
+  padding: 8px;
+  box-shadow: 0 -8px 28px rgba(0, 0, 0, 0.08);
+}
+
+.adjust-quick-row {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.adjust-composer .adjust-quick-row button {
+  flex: 0 0 auto;
+  height: 30px;
+  border: 1px solid #ececec;
+  border-radius: 999px;
+  background: #fff;
+  color: var(--ink);
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.adjust-input-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
 }
 
 .adjust-composer input {
@@ -2270,6 +2323,10 @@ main {
   color: #fff;
   padding: 0 13px;
   font-weight: 900;
+}
+
+.adjust-composer button:disabled {
+  opacity: 0.55;
 }
 
 .adjust-history {

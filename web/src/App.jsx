@@ -682,7 +682,7 @@ function SearchScene({ scenario, onOpen, onOpenXiaotuan, loading }) {
 
 function xiaotuanStatusFor(routeIntent, loading, loadingLabel, plan) {
   const label = loadingLabel || "";
-  if (loading && (label.includes("小团") || label.includes("SmartRoute"))) {
+  if (loading && (label.includes("小团") || label.includes("SmartRoute") || label.includes("规划"))) {
     return { label: loadingLabel || "分析中", tone: "thinking", detail: "正在判断是否需要接入路线规划能力。" };
   }
   if (!routeIntent) {
@@ -709,28 +709,28 @@ function xiaotuanStatusFor(routeIntent, loading, loadingLabel, plan) {
   };
 }
 
-function XiaotuanScene({ scenario, routeIntent, plan, onAsk, onOpen, onViewRoute, loading, loadingLabel }) {
-  const [draft, setDraft] = useState(scenario.query);
-  const [submitted, setSubmitted] = useState("");
+function XiaotuanScene({ scenario, routeIntent, plan, conversation = [], onAsk, onOpen, onViewRoute, loading, loadingLabel }) {
+  const [draft, setDraft] = useState("");
   const slotLabels = {
     location: "地点/区域",
     time: "时间/时长",
     activities: "活动类型",
   };
   const status = xiaotuanStatusFor(routeIntent, loading, loadingLabel, plan);
-  const submittedText = submitted || (routeIntent ? draft : "");
-  const statusClickable = routeIntent?.action === "ask_confirm" || (routeIntent?.action === "open_plugin" && plan);
+  const missingSlots = routeIntent?.missing_slots || routeIntent?.detected_slots?.missing_slots || [];
+  const hasMissingSlots = missingSlots.length > 0;
+  const lastUserText = [...conversation].reverse().find((item) => item.role === "user")?.text || "";
+  const statusClickable = (routeIntent?.action === "ask_confirm" && !hasMissingSlots) || (routeIntent?.action === "open_plugin" && plan);
 
   useEffect(() => {
-    setDraft(scenario.query);
-    setSubmitted("");
+    setDraft("");
   }, [scenario.query]);
 
   function submit() {
     const trimmed = draft.trim();
     if (!trimmed) return;
-    setSubmitted(trimmed);
     onAsk(trimmed);
+    setDraft("");
   }
 
   function openStatusTarget() {
@@ -738,8 +738,8 @@ function XiaotuanScene({ scenario, routeIntent, plan, onAsk, onOpen, onViewRoute
       onViewRoute();
       return;
     }
-    if (routeIntent?.action === "ask_confirm") {
-      onOpen(routeIntent.planning_query || submittedText || draft);
+    if (routeIntent?.action === "ask_confirm" && !hasMissingSlots) {
+      onOpen(routeIntent.merged_query || routeIntent.planning_query || lastUserText || draft);
     }
   }
 
@@ -755,9 +755,9 @@ function XiaotuanScene({ scenario, routeIntent, plan, onAsk, onOpen, onViewRoute
       </div>
 
       <div className="xiaotuan-chat-body">
-        {submittedText && (
+        {lastUserText && (
           <div className="xiaotuan-user-row">
-            <div className="xiaotuan-user-bubble">{submittedText}</div>
+            <div className="xiaotuan-user-bubble">{lastUserText}</div>
           </div>
         )}
 
@@ -773,15 +773,30 @@ function XiaotuanScene({ scenario, routeIntent, plan, onAsk, onOpen, onViewRoute
           </button>
         )}
 
-        {routeIntent?.detected_slots?.missing_slots?.length > 0 && (
+        {hasMissingSlots && (
           <div className="xiaotuan-slot-note">
-            还需要确认：{routeIntent.detected_slots.missing_slots.map((slot) => slotLabels[slot] || slot).join("、")}
+            还需要确认：{missingSlots.map((slot) => slotLabels[slot] || slot).join("、")}
           </div>
         )}
 
-        {routeIntent?.action === "ask_confirm" && (
+        {routeIntent?.clarification_question && (
+          <div className="xiaotuan-other-card">
+            <strong>小团需要确认</strong>
+            <p>{routeIntent.clarification_question}</p>
+          </div>
+        )}
+
+        {routeIntent?.clarification_options?.length > 0 && (
           <div className="xiaotuan-inline-actions">
-            <button onClick={() => onOpen(routeIntent.planning_query || submittedText || draft)} disabled={loading}>排路线</button>
+            {routeIntent.clarification_options.map((option) => (
+              <button key={option} onClick={() => onAsk(option, "chip")} disabled={loading}>{option}</button>
+            ))}
+          </div>
+        )}
+
+        {routeIntent?.action === "ask_confirm" && !hasMissingSlots && (
+          <div className="xiaotuan-inline-actions">
+            <button onClick={() => onOpen(routeIntent.merged_query || routeIntent.planning_query || lastUserText || draft)} disabled={loading}>排路线</button>
             <button disabled={loading}>只看推荐</button>
           </div>
         )}
@@ -793,7 +808,7 @@ function XiaotuanScene({ scenario, routeIntent, plan, onAsk, onOpen, onViewRoute
           </div>
         )}
 
-        {!submittedText && !status && (
+        {!lastUserText && !status && (
           <div className="xiaotuan-empty-prompts">
             {["深圳湾公园附近有什么好玩的", "云南大学玩3个小时", "中国美术馆附近逛街吃饭"].map((item) => (
               <button key={item} onClick={() => setDraft(item)}>{item}</button>
@@ -1158,23 +1173,31 @@ function RouteLoadingState({ label }) {
 
 function AdjustComposer({ onSubmit, loading }) {
   const [draft, setDraft] = useState("");
-  function submit() {
-    const trimmed = draft.trim();
+  const quickAdjustments = ["少走路", "不要排队", "便宜点", "不要这么多咖啡", "不要这么多餐厅", "加展览", "换个重点"];
+  function submit(value = draft) {
+    const trimmed = value.trim();
     if (!trimmed) return;
     onSubmit(trimmed);
     setDraft("");
   }
   return (
     <section className="adjust-composer">
-      <input
-        value={draft}
-        onChange={(event) => setDraft(event.target.value)}
-        placeholder="继续说：少走路一点 / 换便宜点 / 不要排队"
-        onKeyDown={(event) => {
-          if (event.key === "Enter") submit();
-        }}
-      />
-      <button onClick={submit} disabled={loading}>{loading ? "调整中" : "调整"}</button>
+      <div className="adjust-quick-row">
+        {quickAdjustments.map((item) => (
+          <button type="button" key={item} onClick={() => submit(item)} disabled={loading}>{item}</button>
+        ))}
+      </div>
+      <div className="adjust-input-row">
+        <input
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          placeholder="继续说：少走路一点 / 换便宜点 / 不要排队"
+          onKeyDown={(event) => {
+            if (event.key === "Enter") submit();
+          }}
+        />
+        <button type="button" onClick={() => submit()} disabled={loading || !draft.trim()}>{loading ? "调整中" : "调整"}</button>
+      </div>
     </section>
   );
 }
@@ -1290,6 +1313,7 @@ function PhoneExperience({
   routeView,
   loading,
   routeIntent,
+  xiaotuanConversation,
   onOpenRoute,
   onAskXiaotuan,
   onViewRoute,
@@ -1354,6 +1378,7 @@ function PhoneExperience({
             scenario={scenario}
             routeIntent={routeIntent}
             plan={plan}
+            conversation={xiaotuanConversation}
             onAsk={onAskXiaotuan}
             onOpen={onOpenRoute}
             onViewRoute={onViewRoute}
@@ -1879,6 +1904,7 @@ export default function App() {
   const [activeScenarioId, setActiveScenarioId] = useState("search");
   const [phoneMode, setPhoneMode] = useState("entry");
   const [routeIntent, setRouteIntent] = useState(null);
+  const [xiaotuanConversation, setXiaotuanConversation] = useState([]);
   const [profileMode, setProfileMode] = useState("文艺体验型");
   const [profileSource, setProfileSource] = useState("preset");
   const [profileSources, setProfileSources] = useState(null);
@@ -2017,6 +2043,7 @@ export default function App() {
     setQuery(scenario.query);
     setActiveRouteContext(contextForScenario(scenario, scenario.query));
     setRouteIntent(null);
+    setXiaotuanConversation([]);
     setError("");
     setFeedbackStatus("");
     setReplacement(null);
@@ -2078,18 +2105,22 @@ export default function App() {
     }
   }
 
-  async function askXiaotuan(nextQuery) {
+  async function askXiaotuan(nextQuery, replyType = "free_text") {
     const trimmed = nextQuery.trim();
     if (!trimmed) return;
+    const previousIntent = routeIntent?.turn_state === "collecting_slots" ? routeIntent : null;
     setQuery(trimmed);
     setLoading(true);
     setLoadingLabel("小团识别中");
     setError("");
-    setRouteIntent(null);
+    setXiaotuanConversation((items) => [...items, { id: `u-${Date.now()}`, role: "user", text: trimmed }]);
     try {
       const payload = await postJson("/api/route-intent", {
         query: trimmed,
         source: "xiaotuan",
+        conversation_id: previousIntent?.conversation_id || null,
+        previous_intent: previousIntent,
+        user_reply_type: replyType,
         context: {
           entry: "问小团",
           current_city: inferCityHint(trimmed) || activeRouteContext?.city_hint || activeScenario.routeContext?.city_hint || APP_CURRENT_CITY,
@@ -2097,13 +2128,17 @@ export default function App() {
         },
       });
       setRouteIntent(payload);
+      const assistantText = payload.clarification_question
+        || (payload.action === "open_plugin" ? "信息已经补齐，我来帮你生成路线。" : payload.reason);
+      setXiaotuanConversation((items) => [...items, { id: `a-${Date.now()}`, role: "assistant", text: assistantText }]);
       if (payload.action === "open_plugin") {
-        const nextContext = contextForScenario(activeScenario, payload.planning_query || trimmed, {
+        const planningQuery = payload.merged_query || payload.planning_query || trimmed;
+        const nextContext = contextForScenario(activeScenario, planningQuery, {
           source: "xiaotuan",
-          city_hint: inferCityHint(payload.planning_query || trimmed) || activeRouteContext?.city_hint || activeScenario.routeContext?.city_hint || APP_CURRENT_CITY,
-          anchor_text: inferAnchorText(payload.planning_query || trimmed),
+          city_hint: inferCityHint(planningQuery) || activeRouteContext?.city_hint || activeScenario.routeContext?.city_hint || APP_CURRENT_CITY,
+          anchor_text: payload.filled_slots?.location || inferAnchorText(planningQuery),
         });
-        await requestPlanWithPreference(payload.planning_query || trimmed, nextContext, "SmartRoute 调用中", false);
+        await requestPlanWithPreference(planningQuery, nextContext, "SmartRoute 调用中", false);
       }
     } catch (err) {
       setError(err.message || "意图识别失败");
@@ -2126,10 +2161,10 @@ export default function App() {
         route: selectedRouteView.route,
         user_id: USER_ID,
         profile_mode: profileMode,
-          profile_source: profileSource,
-          profile_id: profileSource === "manual_import" ? importedProfileId : null,
-          route_context: activeRouteContext,
-        });
+        profile_source: profileSource,
+        profile_id: profileSource === "manual_import" ? importedProfileId : null,
+        route_context: activeRouteContext,
+      });
       const nextRoutes = plan.routes.map((routeView, index) => (
         index === selectedRouteIndex ? payload.route : routeView
       ));
@@ -2145,6 +2180,7 @@ export default function App() {
         tool_trace: plan.tool_trace || [],
       });
       setLatestAdjustment(payload);
+      setFeedbackStatus(`${statusText(payload.adjustment_status)}：${payload.adjustment_summary}`);
       const deltas = payload.metric_deltas || {};
       setAdjustmentHistory((items) => [
         ...items,
@@ -2250,6 +2286,7 @@ export default function App() {
           plan={plan}
           routeView={selectedRouteView}
           loading={loading}
+          xiaotuanConversation={xiaotuanConversation}
           routeIntent={routeIntent}
           onOpenRoute={(nextQuery, explicitContext) => {
             requestPlanWithPreference(nextQuery, explicitContext, "规划中");

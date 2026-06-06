@@ -67,6 +67,9 @@ class RouteIntentRequest(BaseModel):
     query: str = Field(min_length=1)
     source: str = "xiaotuan"
     context: dict[str, Any] = Field(default_factory=dict)
+    conversation_id: str | None = None
+    previous_intent: RouteIntentResult | None = None
+    user_reply_type: Literal["free_text", "chip", "confirm_route", "skip"] = "free_text"
 
 
 class CandidateView(BaseModel):
@@ -911,10 +914,26 @@ def unique_categories(categories: list[POICategory]) -> list[POICategory]:
         POICategory.CAFE,
         POICategory.ATTRACTION,
         POICategory.ENTERTAINMENT,
+        POICategory.SHOPPING,
     ]:
         if category not in ordered:
             ordered.append(category)
     return ordered[:6]
+
+
+def route_role_keywords(query: str, intent: ParsedIntent) -> list[str]:
+    text = f"{query} {intent.extracted_preferences.get('raw_query', '')}"
+    keywords: list[str] = []
+    rules = [
+        (["文化", "展", "展览", "馆", "博物", "美术", "艺术"], ["文化", "展览", "博物馆", "艺术馆"]),
+        (["散步", "步行", "逛", "街区", "公园", "广场"], ["公园", "步行街", "街区", "广场"]),
+        (["喝点东西", "咖啡", "茶", "甜品", "下午茶"], ["咖啡", "茶饮", "下午茶"]),
+        (["粤菜", "餐厅", "吃饭", "正餐", "晚餐"], ["餐厅", "特色菜", "本地风味"]),
+    ]
+    for triggers, terms in rules:
+        if any(trigger in text for trigger in triggers):
+            keywords.extend(terms)
+    return list(dict.fromkeys(keywords))[:10]
 
 
 def build_dynamic_candidates(
@@ -947,10 +966,14 @@ def build_dynamic_candidates(
 
     radius = 1500 if meituan_context.walk_preference == "少走路" else 3000
     categories = unique_categories(intent.constraints.preferred_categories)
-    query_keywords = [anchor.text, *meituan_context.search_preferences[:3]]
+    query_keywords = [
+        *route_role_keywords(request.query, intent),
+        anchor.text,
+        *meituan_context.search_preferences[:3],
+    ]
     amap_pois = amap_client.search_pois(anchor, categories, keywords=query_keywords, radius_meters=radius)
     if amap_pois:
-        trace_notes.append(f"高德 POI：围绕 {anchor.text} {radius}m 召回 {len(amap_pois)} 个真实候选。")
+        trace_notes.append(f"高德 POI：围绕 {anchor.text} {radius}m 按行程角色召回 {len(amap_pois)} 个真实候选。")
     else:
         amap_error_text = "；".join(amap_client.recent_errors())
         trace_notes.append(
@@ -1120,7 +1143,7 @@ def route_insight(route: Route, intent: ParsedIntent) -> RouteInsight:
 
     categories = {stop.poi.category for stop in route.stops}
     has_meal = bool(categories.intersection({POICategory.RESTAURANT, POICategory.CAFE}))
-    has_culture = bool(categories.intersection({POICategory.ATTRACTION, POICategory.ENTERTAINMENT}))
+    has_culture = bool(categories.intersection({POICategory.ATTRACTION, POICategory.ENTERTAINMENT, POICategory.SHOPPING}))
     route_complete = len(route.stops) >= 3
 
     hit_labels = [
@@ -1130,7 +1153,7 @@ def route_insight(route: Route, intent: ParsedIntent) -> RouteInsight:
         "区域命中" if district_hit else "区域已放宽",
         "距离/步行可控" if route.total_transit_minutes <= constraints.max_walk_minutes * max(1, len(route.stops) - 1) else "距离/步行偏高",
         ">=3 POI" if route_complete else "POI 数不足",
-        "餐饮+文化/娱乐覆盖" if has_meal and has_culture else "类型覆盖不足",
+        "餐饮+文化/娱乐/散步覆盖" if has_meal and has_culture else "类型覆盖不足",
     ]
 
     score = 64
@@ -1192,16 +1215,16 @@ def build_route_completeness(route: Route | None) -> RouteCompleteness | None:
         return None
     categories = {stop.poi.category for stop in route.stops}
     has_meal = bool(categories.intersection({POICategory.RESTAURANT, POICategory.CAFE}))
-    has_culture = bool(categories.intersection({POICategory.ATTRACTION, POICategory.ENTERTAINMENT}))
+    has_culture = bool(categories.intersection({POICategory.ATTRACTION, POICategory.ENTERTAINMENT, POICategory.SHOPPING}))
     notes = []
     if len(route.stops) < 3:
         notes.append("POI 数不足 3 个")
     if not has_meal:
         notes.append("缺少餐饮或咖啡休息点")
     if not has_culture:
-        notes.append("缺少文化/娱乐体验点")
+        notes.append("缺少文化/娱乐/散步体验点")
     if not notes:
-        notes.append("路线满足 3 个以上 POI 串联，并覆盖餐饮 + 文化/娱乐")
+        notes.append("路线满足 3 个以上 POI 串联，并覆盖餐饮 + 文化/娱乐/散步")
     return RouteCompleteness(
         stop_count=len(route.stops),
         has_meal=has_meal,
@@ -1422,6 +1445,8 @@ def objective_improved(kind: str, deltas: MetricDeltas) -> bool:
         return deltas.total_transit_minutes < 0
     if kind == "add":
         return deltas.stop_count > 0 or deltas.total_time_minutes <= 30
+    if kind == "focus":
+        return True
     return False
 
 
@@ -1440,7 +1465,7 @@ def adjustment_status_for(
         return "not_applied"
     if kind in {"cheaper", "wait", "walk"} and not objective_improved(kind, deltas):
         return "partial"
-    if kind == "add" and candidate is None:
+    if kind in {"add", "focus"} and candidate is None:
         return "partial"
     return "applied"
 
@@ -1473,6 +1498,8 @@ def suggested_relaxations_for(
         suggestions.append("可允许短途打车，或把活动范围收窄到同一商圈。")
     elif kind == "add":
         suggestions.append("可延长 30 分钟，或允许替换掉当前匹配度最低的一站。")
+    elif kind == "focus":
+        suggestions.append("可放宽活动类型，或把范围扩大到附近 3-5 公里以补足文化/娱乐/购物点。")
     if any("预算" in conflict for conflict in conflicts):
         suggestions.append("当前预算约束较紧，建议优先放宽预算或减少正餐数量。")
     if any("排队" in conflict or "等待" in conflict for conflict in conflicts):
@@ -1484,6 +1511,12 @@ def suggested_relaxations_for(
 
 def detect_adjustment_kind(instruction: str) -> tuple[str, set[POICategory] | None]:
     text = instruction.strip()
+    if any(word in text for word in ["太多餐厅", "太多吃的", "不要这么多餐厅", "别这么多餐厅", "全是餐厅", "都是餐厅", "餐厅太多", "少点餐厅", "少一点餐厅"]):
+        return "focus", {POICategory.ATTRACTION, POICategory.ENTERTAINMENT, POICategory.SHOPPING, POICategory.CAFE}
+    if any(word in text for word in ["不要这么多咖啡", "别这么多咖啡", "全是咖啡", "都是咖啡", "咖啡太多", "太多咖啡", "少点咖啡", "少一点咖啡", "不要全是咖啡"]):
+        return "focus", {POICategory.ATTRACTION, POICategory.ENTERTAINMENT, POICategory.SHOPPING, POICategory.RESTAURANT}
+    if any(word in text for word in ["换个重点", "重点", "不想都是", "太多同类", "更丰富", "换一类"]):
+        return "focus", {POICategory.ATTRACTION, POICategory.ENTERTAINMENT, POICategory.SHOPPING, POICategory.RESTAURANT}
     if any(word in text for word in ["少走", "近一点", "距离", "别太远", "打车少"]):
         return "walk", None
     if any(word in text for word in ["便宜", "省钱", "预算", "贵"]):
@@ -1661,6 +1694,16 @@ def find_adjustment_candidate(
         options = [poi for poi, _ in candidates if poi.id not in current_ids and poi.category in category_filter]
     if not options:
         return None
+    if kind == "focus":
+        return sorted(
+            options,
+            key=lambda poi: (
+                poi.category in {POICategory.RESTAURANT, POICategory.CAFE},
+                -poi.rating,
+                poi.avg_wait_minutes,
+                poi.price_per_person,
+            ),
+        )[0]
     if kind == "cheaper":
         cheaper = [poi for poi in options if poi.price_per_person < target_stop.poi.price_per_person]
         if not cheaper:
@@ -1691,6 +1734,22 @@ def find_adjustment_candidate(
 
 
 def choose_adjustment_target(route: Route, kind: str) -> int:
+    if kind == "focus":
+        seen_categories: set[POICategory] = set()
+        for index, stop in enumerate(route.stops):
+            if stop.poi.category == POICategory.CAFE and index > 0:
+                return index
+            if stop.poi.category in seen_categories and stop.poi.category in {POICategory.CAFE, POICategory.RESTAURANT}:
+                return index
+            seen_categories.add(stop.poi.category)
+        foodish = [
+            (index, stop.poi.rating)
+            for index, stop in enumerate(route.stops)
+            if stop.poi.category in {POICategory.CAFE, POICategory.RESTAURANT}
+        ]
+        if foodish:
+            return min(foodish, key=lambda item: item[1])[0]
+        return len(route.stops) - 1
     if kind == "cheaper":
         priced = [
             (index, stop.poi.price_per_person)
@@ -1736,6 +1795,8 @@ def adjustment_summary(
         return f"已根据“{instruction}”避开指定类型，并替换为 {target}，保持路线仍可执行。"
     if kind == "reduce_category":
         return f"已根据“{instruction}”减少指定类型站点，并替换为 {target}，保持路线仍可执行。"
+    if kind == "focus":
+        return f"已根据“{instruction}”把重复/弱重点站替换为 {target}，让路线更像真实的一次出行。"
     return f"已根据“{instruction}”加入或替换为 {target}，保持路线仍可执行。"
 
 
@@ -1984,6 +2045,9 @@ def route_intent(request: RouteIntentRequest) -> RouteIntentResult:
         request.query,
         source=request.source,
         context=request.context,
+        previous_intent=request.previous_intent,
+        conversation_id=request.conversation_id,
+        user_reply_type=request.user_reply_type,
     )
 
 
@@ -2063,7 +2127,7 @@ def plan_route(request: PlanRequest) -> PlanResponse:
         intent,
         meituan_context,
         amap_client,
-        allow_anchor_fallback=not live_location_required,
+        allow_anchor_fallback=bool(request.route_context and request.route_context.selected_pois) or not live_location_required,
     )
     if dynamic_candidates:
         candidates = dynamic_candidates
@@ -2188,8 +2252,35 @@ def adjust_route(request: AdjustRequest) -> AdjustResponse:
     adjusted_route = None
     if should_rebuild_route:
         adjusted_route = agents.route_planner.build_route_from_pois(intent, next_pois, "实时调整")
+        if adjusted_route is None and kind == "focus" and candidates:
+            repaired_pois = agents.route_planner._repair_selected_stops(
+                intent,
+                next_pois,
+                candidates,
+                max_stops=max(3, len(request.route.stops)),
+                budget=intent.constraints.budget_per_person,
+                pinned_pois=[],
+            )
+            repaired_route = agents.route_planner.build_route_from_pois(intent, repaired_pois, "实时调整")
+            if repaired_route is not None:
+                adjusted_route = repaired_route
         if adjusted_route is not None:
             adjusted_route = enrich_route_with_amap_segments(adjusted_route, amap_client, intent.constraints.transport_mode)
+            structure_issues = agents.route_planner._structure_warnings(intent, [stop.poi for stop in adjusted_route.stops])
+            if structure_issues and candidates:
+                repaired_pois = agents.route_planner._repair_selected_stops(
+                    intent,
+                    [stop.poi for stop in adjusted_route.stops],
+                    candidates,
+                    max_stops=max(3, len(adjusted_route.stops)),
+                    budget=intent.constraints.budget_per_person,
+                    pinned_pois=[],
+                )
+                repaired_route = agents.route_planner.build_route_from_pois(intent, repaired_pois, "实时调整")
+                if repaired_route is not None:
+                    repaired_issues = agents.route_planner._structure_warnings(intent, [stop.poi for stop in repaired_route.stops])
+                    if len(repaired_issues) < len(structure_issues):
+                        adjusted_route = enrich_route_with_amap_segments(repaired_route, amap_client, intent.constraints.transport_mode)
     if adjusted_route is None:
         route_build_failed = should_rebuild_route
         adjusted_route = request.route.model_copy(deep=True)
@@ -2211,6 +2302,11 @@ def adjust_route(request: AdjustRequest) -> AdjustResponse:
         status = "not_applied"
     elif status == "applied" and not adjustment_intent_satisfied(adjustment_intent, adjusted_route):
         status = "partial"
+    structure_issues = agents.route_planner._structure_warnings(intent, [stop.poi for stop in adjusted_route.stops])
+    if structure_issues:
+        adjusted_route.warnings = list(dict.fromkeys([*adjusted_route.warnings, *structure_issues]))[:5]
+        if status == "applied":
+            status = "partial"
 
     changed_name = candidate.name if candidate else None
     summary = adjustment_summary(kind, request.instruction, changed_name, status, deltas)
