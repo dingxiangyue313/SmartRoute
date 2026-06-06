@@ -682,7 +682,10 @@ function SearchScene({ scenario, onOpen, onOpenXiaotuan, loading }) {
 
 function xiaotuanStatusFor(routeIntent, loading, loadingLabel, plan) {
   const label = loadingLabel || "";
-  if (loading && (label.includes("小团") || label.includes("SmartRoute") || label.includes("规划"))) {
+  if (loading && label.includes("SmartRoute")) {
+    return { label: "已调用 SmartRoute", tone: "smart-route", detail: "SmartRoute 正在生成路线结果。" };
+  }
+  if (loading && (label.includes("小团") || label.includes("规划"))) {
     return { label: loadingLabel || "分析中", tone: "thinking", detail: "正在判断是否需要接入路线规划能力。" };
   }
   if (!routeIntent) {
@@ -1905,6 +1908,7 @@ export default function App() {
   const [phoneMode, setPhoneMode] = useState("entry");
   const [routeIntent, setRouteIntent] = useState(null);
   const [xiaotuanConversation, setXiaotuanConversation] = useState([]);
+  const [xiaotuanPendingIntent, setXiaotuanPendingIntent] = useState(null);
   const [profileMode, setProfileMode] = useState("文艺体验型");
   const [profileSource, setProfileSource] = useState("preset");
   const [profileSources, setProfileSources] = useState(null);
@@ -2043,6 +2047,7 @@ export default function App() {
     setQuery(scenario.query);
     setActiveRouteContext(contextForScenario(scenario, scenario.query));
     setRouteIntent(null);
+    setXiaotuanPendingIntent(null);
     setXiaotuanConversation([]);
     setError("");
     setFeedbackStatus("");
@@ -2108,8 +2113,9 @@ export default function App() {
   async function askXiaotuan(nextQuery, replyType = "free_text") {
     const trimmed = nextQuery.trim();
     if (!trimmed) return;
-    const previousIntent = routeIntent?.turn_state === "collecting_slots" ? routeIntent : null;
-    setQuery(trimmed);
+    const previousIntent = xiaotuanPendingIntent
+      || ((routeIntent?.turn_state === "collecting_slots" || routeIntent?.missing_slots?.length > 0) ? routeIntent : null);
+    setQuery(previousIntent?.merged_query || previousIntent?.planning_query || trimmed);
     setLoading(true);
     setLoadingLabel("小团识别中");
     setError("");
@@ -2123,11 +2129,22 @@ export default function App() {
         user_reply_type: replyType,
         context: {
           entry: "问小团",
-          current_city: inferCityHint(trimmed) || activeRouteContext?.city_hint || activeScenario.routeContext?.city_hint || APP_CURRENT_CITY,
+          current_city: inferCityHint(trimmed)
+            || inferCityHint(previousIntent?.merged_query || previousIntent?.planning_query || "")
+            || activeRouteContext?.city_hint
+            || activeScenario.routeContext?.city_hint
+            || APP_CURRENT_CITY,
+          anchor_text: previousIntent?.filled_slots?.location || activeRouteContext?.anchor_text || null,
+          previous_filled_slots: previousIntent?.filled_slots || null,
           product: "meituan",
         },
       });
       setRouteIntent(payload);
+      if (payload.turn_state === "collecting_slots" || payload.missing_slots?.length > 0) {
+        setXiaotuanPendingIntent(payload);
+      } else {
+        setXiaotuanPendingIntent(null);
+      }
       const assistantText = payload.clarification_question
         || (payload.action === "open_plugin" ? "信息已经补齐，我来帮你生成路线。" : payload.reason);
       setXiaotuanConversation((items) => [...items, { id: `a-${Date.now()}`, role: "assistant", text: assistantText }]);
@@ -2138,7 +2155,8 @@ export default function App() {
           city_hint: inferCityHint(planningQuery) || activeRouteContext?.city_hint || activeScenario.routeContext?.city_hint || APP_CURRENT_CITY,
           anchor_text: payload.filled_slots?.location || inferAnchorText(planningQuery),
         });
-        await requestPlanWithPreference(planningQuery, nextContext, "SmartRoute 调用中", false);
+        setXiaotuanPendingIntent(null);
+        await generatePlan(planningQuery, true, profileMode, "SmartRoute 调用中", profileSource, importedProfileId, nextContext);
       }
     } catch (err) {
       setError(err.message || "意图识别失败");

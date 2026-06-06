@@ -884,6 +884,45 @@ def test_route_intent_multi_turn_slot_completion(monkeypatch):
     assert "3小时" in second_payload["merged_query"]
 
 
+def test_route_intent_short_reply_keeps_previous_slots(monkeypatch):
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    load_agents.cache_clear()
+    client = TestClient(app)
+
+    first = client.post(
+        "/api/route-intent",
+        json={"query": "去深圳大学玩几个小时", "source": "xiaotuan"},
+    )
+
+    assert first.status_code == 200
+    first_payload = first.json()
+    assert first_payload["action"] == "ask_confirm"
+    assert first_payload["turn_state"] == "collecting_slots"
+    assert first_payload["missing_slots"] == ["time"]
+    assert first_payload["filled_slots"]["location"] == "深圳大学"
+
+    second = client.post(
+        "/api/route-intent",
+        json={
+            "query": "3个小时",
+            "source": "xiaotuan",
+            "conversation_id": first_payload["conversation_id"],
+            "previous_intent": first_payload,
+        },
+    )
+
+    assert second.status_code == 200
+    second_payload = second.json()
+    assert second_payload["action"] == "open_plugin"
+    assert second_payload["turn_state"] == "ready_to_plan"
+    assert second_payload["missing_slots"] == []
+    assert second_payload["filled_slots"]["location"] == "深圳大学"
+    assert second_payload["filled_slots"]["time"] == "3个小时"
+    assert "景点" in second_payload["filled_slots"]["activities"]
+    assert "深圳大学" in second_payload["merged_query"]
+    assert "3个小时" in second_payload["merged_query"]
+
+
 def test_route_intent_context_does_not_repeat_location_question(monkeypatch):
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     load_agents.cache_clear()

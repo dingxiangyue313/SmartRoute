@@ -374,7 +374,8 @@ class RouteIntentRouterAgent:
         conversation_id: str,
         user_reply_type: str,
     ) -> RouteIntentResult:
-        if result.action == "normal_answer":
+        is_slot_continuation = previous_intent is not None and previous_intent.turn_state == "collecting_slots"
+        if result.action == "normal_answer" and not is_slot_continuation:
             return result.model_copy(
                 update={
                     "conversation_id": conversation_id,
@@ -384,6 +385,15 @@ class RouteIntentRouterAgent:
                     "clarification_question": None,
                     "clarification_options": [],
                     "merged_query": query,
+                }
+            )
+        if result.action == "normal_answer" and is_slot_continuation:
+            result = result.model_copy(
+                update={
+                    "action": "ask_confirm",
+                    "confidence": max(result.confidence, 0.58),
+                    "reason": "用户正在补充上一轮路线规划缺失信息。",
+                    "intent_type": previous_intent.intent_type or "route_plan",
                 }
             )
 
