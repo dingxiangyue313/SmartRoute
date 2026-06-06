@@ -260,6 +260,7 @@ def test_live_anchor_does_not_fake_route_with_multiple_restaurants(monkeypatch):
             )
 
         def search_pois(self, anchor, categories, keywords=None, radius_meters=3000, limit_per_category=8):
+            assert POICategory.ENTERTAINMENT not in categories
             return [
                 make_amap_poi("陈添记西关老字号", POICategory.RESTAURANT, 1),
                 make_amap_poi("东湖酒楼粤菜老字号", POICategory.RESTAURANT, 2),
@@ -796,7 +797,7 @@ def test_adjust_api_repairs_too_many_cafes(monkeypatch):
     assert categories.count("咖啡/茶饮") <= 1
     assert any(category in {"景点", "娱乐", "购物"} for category in categories)
     assert payload["changed_stops"]
-    assert "kind=focus" in payload["tool_trace"][0]["output"]
+    assert "kind=reduce_category" in payload["tool_trace"][0]["output"]
 
 
 def test_route_intent_rules_fallback(monkeypatch):

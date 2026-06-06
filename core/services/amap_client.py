@@ -165,8 +165,13 @@ class AMapClient:
 
         for category in categories:
             type_codes = CATEGORY_TYPE_CODES.get(category, "")
-            query_terms = list(dict.fromkeys([*keywords_for_category(category), *terms]))[:5]
+            query_terms = list(dict.fromkeys([*keywords_for_category(category), *terms]))[:3]
+            target_count = min(3, limit_per_category)
+            category_had_around_error = False
             for keyword in [*query_terms, ""]:
+                category_count = sum(1 for poi in pois if poi.category == category)
+                if category_count >= target_count or (category_had_around_error and category_count > 0):
+                    break
                 try:
                     payload = self._get(
                         "/v5/place/around",
@@ -188,10 +193,83 @@ class AMapClient:
                         seen.add(poi.id)
                         pois.append(poi)
                 except Exception as exc:
+                    category_had_around_error = True
                     label = keyword or "types-only"
                     self._remember_error(f"place/around:{category.value}:{label}", exc)
-                    continue
+                    break
+            category_count = sum(1 for poi in pois if poi.category == category)
+            if category_count < target_count and (category_had_around_error or category_count == 0):
+                for poi in self._search_pois_by_text(anchor, category, query_terms, radius_meters, limit_per_category):
+                    if poi.id in seen:
+                        continue
+                    seen.add(poi.id)
+                    pois.append(poi)
         return sort_by_anchor_distance(pois)
+
+    def _search_pois_by_text(
+        self,
+        anchor: AMapAnchor,
+        category: POICategory,
+        keywords: list[str],
+        radius_meters: int,
+        limit_per_category: int,
+    ) -> list[POI]:
+        type_codes = CATEGORY_TYPE_CODES.get(category, "")
+        query_terms: list[str] = []
+        for keyword in keywords[:4]:
+            clean_keyword = keyword.strip()
+            if not clean_keyword:
+                continue
+            if anchor.text and anchor.text not in clean_keyword:
+                query_terms.append(f"{anchor.text} {clean_keyword}")
+            query_terms.append(clean_keyword)
+        if anchor.text:
+            query_terms.append(anchor.text)
+
+        pois: list[POI] = []
+        seen: set[str] = set()
+        for keyword in list(dict.fromkeys(query_terms))[:6]:
+            try:
+                payload = self._get(
+                    "/v5/place/text",
+                    {
+                        "keywords": keyword,
+                        "types": type_codes,
+                        "region": anchor.city if anchor.city != "未知城市" else "",
+                        "show_fields": "business,photos",
+                        "page_size": str(limit_per_category),
+                        "output": "JSON",
+                    },
+                )
+            except Exception as exc:
+                self._remember_error(f"place/text:{category.value}:{keyword}", exc)
+                continue
+
+            for item in payload.get("pois") or []:
+                poi = poi_from_amap(item, category, anchor)
+                if not poi or poi.id in seen:
+                    continue
+                distance_meters = round(
+                    haversine_km(
+                        anchor.location.latitude,
+                        anchor.location.longitude,
+                        poi.latitude,
+                        poi.longitude,
+                    )
+                    * 1000
+                )
+                if distance_meters > radius_meters:
+                    continue
+                poi.distance_from_anchor_meters = distance_meters
+                poi.ugc_summary = (
+                    f"来自高德关键词搜索，距{anchor.text or '锚点'}约 {distance_meters} 米，"
+                    "作为周边搜索失败时的真实 POI 兜底候选。"
+                )
+                seen.add(poi.id)
+                pois.append(poi)
+                if len(pois) >= limit_per_category:
+                    return pois
+        return pois
 
     def route_segment(
         self,
@@ -451,8 +529,10 @@ def poi_from_amap(item: dict[str, Any], category: POICategory, anchor: AMapAncho
 
 def is_unsuitable_for_route(name: str, type_name: str, category: POICategory) -> bool:
     text = f"{name} {type_name}"
-    general_blocklist = ["派出所", "公安", "医院", "诊所", "银行", "公厕", "停车场", "写字楼", "公司"]
+    general_blocklist = ["派出所", "公安", "医院", "诊所", "银行", "公厕", "停车场", "写字楼"]
     if any(word in text for word in general_blocklist):
+        return True
+    if category not in {POICategory.CAFE, POICategory.RESTAURANT} and "公司" in text:
         return True
     if category in {POICategory.ATTRACTION, POICategory.ENTERTAINMENT}:
         culture_blocklist = ["小学", "中学", "幼儿园", "培训", "教育机构", "驾校"]

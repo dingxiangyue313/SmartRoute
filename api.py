@@ -921,6 +921,35 @@ def unique_categories(categories: list[POICategory]) -> list[POICategory]:
     return ordered[:6]
 
 
+def categories_for_live_route(query: str, intent: ParsedIntent, base_categories: list[POICategory]) -> list[POICategory]:
+    text = f"{query} {intent.extracted_preferences.get('raw_query', '')}"
+    ordered: list[POICategory] = []
+
+    def add(category: POICategory) -> None:
+        if category not in ordered:
+            ordered.append(category)
+
+    if any(word in text for word in ["文化", "展", "展览", "馆", "博物", "美术", "艺术", "景点"]):
+        add(POICategory.ATTRACTION)
+    if any(word in text for word in ["散步", "步行", "逛", "街区", "公园", "广场", "商圈", "市集", "坊", "天地"]):
+        add(POICategory.SHOPPING)
+        add(POICategory.ATTRACTION)
+    if any(word in text for word in ["喝点东西", "喝东西", "咖啡", "茶", "奶茶", "甜品", "下午茶", "饮品"]):
+        add(POICategory.CAFE)
+    if any(word in text for word in ["餐饮", "餐厅", "正餐", "吃饭", "午饭", "晚饭", "晚餐", "粤菜", "火锅", "烧烤", "逛吃"]):
+        add(POICategory.RESTAURANT)
+    if any(word in text for word in ["电影", "演出", "娱乐", "剧场", "密室", "ktv", "KTV"]):
+        add(POICategory.ENTERTAINMENT)
+
+    for category in base_categories:
+        add(category)
+        if len(ordered) >= 4:
+            break
+    if not ordered:
+        ordered = [POICategory.ATTRACTION, POICategory.CAFE, POICategory.SHOPPING]
+    return ordered[:4]
+
+
 def route_role_keywords(query: str, intent: ParsedIntent) -> list[str]:
     text = f"{query} {intent.extracted_preferences.get('raw_query', '')}"
     keywords: list[str] = []
@@ -965,7 +994,7 @@ def build_dynamic_candidates(
     intent.extracted_preferences["anchor_source"] = anchor.source
 
     radius = 1500 if meituan_context.walk_preference == "少走路" else 3000
-    categories = unique_categories(intent.constraints.preferred_categories)
+    categories = categories_for_live_route(request.query, intent, intent.constraints.preferred_categories)
     query_keywords = [
         *route_role_keywords(request.query, intent),
         anchor.text,
@@ -1544,7 +1573,20 @@ CATEGORY_ALIASES: dict[POICategory, list[str]] = {
 
 
 NEGATIVE_ADJUSTMENT_TERMS = ["不想", "不要", "别", "不去", "去掉", "删掉", "移除", "换掉", "避开", "不喝", "不吃"]
-REDUCE_ADJUSTMENT_TERMS = ["少安排", "少一点", "少点", "不要两家", "不要多个", "别太多", "减少"]
+REDUCE_ADJUSTMENT_TERMS = [
+    "少安排",
+    "少一点",
+    "少点",
+    "不要两家",
+    "不要多个",
+    "不要这么多",
+    "别这么多",
+    "别太多",
+    "太多",
+    "都是",
+    "全是",
+    "减少",
+]
 
 
 def mentioned_categories(instruction: str) -> set[POICategory]:
@@ -1647,7 +1689,7 @@ def parse_adjustment_intent(
     categories = mentioned_categories(instruction)
     if categories and (has_negative_adjustment(instruction) or has_reduce_adjustment(instruction)):
         target_index = choose_category_target(route, categories)
-        reduce_only = has_reduce_adjustment(instruction) and not has_negative_adjustment(instruction)
+        reduce_only = has_reduce_adjustment(instruction)
         return AdjustmentIntent(
             kind="reduce_category" if reduce_only else "avoid_category",
             categories=categories,
@@ -2252,7 +2294,7 @@ def adjust_route(request: AdjustRequest) -> AdjustResponse:
     adjusted_route = None
     if should_rebuild_route:
         adjusted_route = agents.route_planner.build_route_from_pois(intent, next_pois, "实时调整")
-        if adjusted_route is None and kind == "focus" and candidates:
+        if adjusted_route is None and kind in {"focus", "reduce_category", "avoid_category"} and candidates:
             repaired_pois = agents.route_planner._repair_selected_stops(
                 intent,
                 next_pois,
