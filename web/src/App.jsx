@@ -649,12 +649,12 @@ function SmartRouteEntryCard({ title, text, action, onOpen, loading }) {
   );
 }
 
-function SearchScene({ scenario, onOpen, onOpenXiaotuan, loading }) {
+function SearchScene({ scenario, onOpen, loading }) {
   return (
     <div className="meituan-page">
       <div className="mt-header">
         <strong>搜索</strong>
-        <button className="mt-header-link" onClick={onOpenXiaotuan}>问小团</button>
+        <span>问小团</span>
       </div>
       <div className="mt-searchbar">深圳大学 附近 下午怎么玩 <b>搜索</b></div>
       <section className="mt-section">
@@ -680,70 +680,155 @@ function SearchScene({ scenario, onOpen, onOpenXiaotuan, loading }) {
   );
 }
 
-function xiaotuanStatusFor(routeIntent, loading, loadingLabel, plan) {
-  const label = loadingLabel || "";
-  if (loading && label.includes("SmartRoute")) {
-    return { label: "已调用 SmartRoute", tone: "smart-route", detail: "SmartRoute 正在生成路线结果。" };
-  }
-  if (loading && (label.includes("小团") || label.includes("规划"))) {
-    return { label: loadingLabel || "分析中", tone: "thinking", detail: "正在判断是否需要接入路线规划能力。" };
-  }
-  if (!routeIntent) {
-    return null;
-  }
-  if (routeIntent.action === "open_plugin") {
-    return {
-      label: plan ? "已调用 SmartRoute" : "已调用 SmartRoute",
-      tone: "smart-route",
-      detail: plan ? "路线结果已生成，点击查看规划详情。" : "正在进入路线规划流程。",
-    };
-  }
-  if (routeIntent.action === "ask_confirm" || routeIntent.action === "ask_clarification") {
-    return {
-      label: "需要继续确认",
-      tone: "confirm",
-      detail: routeIntent.follow_up_question || routeIntent.reason || "需要补齐信息后再决定是否调用 SmartRoute。",
-    };
-  }
-  return {
-    label: "已转普通小团回答",
-    tone: "normal",
-    detail: routeIntent.reason || "当前问题不需要调用 SmartRoute。",
-  };
+function InlineAdjustmentResultCard({ adjustment }) {
+  if (!adjustment) return null;
+  return (
+    <article className={`xiaotuan-adjust-card ${adjustment.adjustment_status || ""}`}>
+      <div>
+        <span>{statusText(adjustment.adjustment_status)}</span>
+        <strong>{adjustment.adjustment_summary}</strong>
+      </div>
+      <div className="xiaotuan-adjust-deltas">
+        <em>等位 {metricDelta(adjustment.metric_deltas?.total_wait_minutes)}</em>
+        <em>人均 {metricDelta(adjustment.metric_deltas?.total_cost_per_person, "¥")}</em>
+        <em>移动 {metricDelta(adjustment.metric_deltas?.total_transit_minutes)}</em>
+      </div>
+      {adjustment.changed_stops?.length > 0 && (
+        <div className="xiaotuan-changed-stops">
+          {adjustment.changed_stops.slice(0, 2).map((change) => (
+            <p key={`${change.order}-${change.action}`}>
+              第{change.order}站：{change.before_poi || "新增"} → {change.after_poi || "移除"}
+            </p>
+          ))}
+        </div>
+      )}
+      {adjustment.suggested_relaxations?.length > 0 && (
+        <div className="xiaotuan-relaxations">
+          {adjustment.suggested_relaxations.slice(0, 2).map((item) => <p key={item}>{item}</p>)}
+        </div>
+      )}
+    </article>
+  );
 }
 
-function XiaotuanScene({ scenario, routeIntent, plan, conversation = [], onAsk, onOpen, onViewRoute, loading, loadingLabel }) {
+function InlineRouteResultCard({ message, isLatest, onFeedback, onAdjust, loading }) {
+  const [expanded, setExpanded] = useState(false);
   const [draft, setDraft] = useState("");
+  const routeView = message.routeView;
+  const plan = message.plan;
+  const route = routeView?.route;
+  const stops = route?.stops || [];
+  const visibleStops = expanded ? stops : stops.slice(0, 4);
+  const quickAdjustments = ["少走路", "不要排队", "便宜点", "不要这么多咖啡", "换个文化点"];
+
+  function submit(value = draft) {
+    const trimmed = value.trim();
+    if (!trimmed) return;
+    onAdjust(trimmed);
+    setDraft("");
+  }
+
+  if (!routeView) {
+    return (
+      <article className="xiaotuan-route-card empty">
+        <span>SmartRoute 已完成分析</span>
+        <h3>当前没有生成完整路线</h3>
+        <p>{plan?.constraint_conflicts?.join("；") || "真实地点候选不足，可以补充区域、延长时间或放宽活动类型。"}</p>
+      </article>
+    );
+  }
+
+  return (
+    <article className="xiaotuan-route-card">
+      <button className="xiaotuan-analysis done" type="button">
+        <span>已完成分析</span>
+        <b>›</b>
+      </button>
+      <p className="xiaotuan-route-summary">
+        我按你的地点、时间和偏好，把附近真实 POI 串成一条可执行路线。优先避免连续同类店铺，并保留后续可调整空间。
+      </p>
+      <RouteMap route={route} />
+      <div className="xiaotuan-route-title">
+        <div>
+          <span>推荐路线</span>
+          <h3>{route.title}</h3>
+        </div>
+        <strong>{routeView.insight?.wait_status || "可执行"}</strong>
+      </div>
+      <div className="xiaotuan-route-metrics">
+        <span>可信度 {routeView.insight?.confidence_score ?? "--"}</span>
+        <span>{minutes(route.total_time_minutes)}</span>
+        <span>人均 {money(route.total_cost_per_person)}</span>
+        <span>等位 {route.total_wait_minutes}m</span>
+      </div>
+      <div className="xiaotuan-inline-stops">
+        {visibleStops.map((stop) => (
+          <div className="xiaotuan-inline-stop" key={`${message.id}-${stop.order}-${stop.poi.id}`}>
+            <b>{stop.order}</b>
+            <div>
+              <h4>{stop.poi.name}</h4>
+              <p>{stop.arrival_time} - {stop.departure_time} · {stop.poi.category} · 评分 {stop.poi.rating}</p>
+              <small>{stop.tips || stop.poi.ugc_summary}</small>
+            </div>
+          </div>
+        ))}
+      </div>
+      {stops.length > 4 && (
+        <button className="xiaotuan-expand-route" type="button" onClick={() => setExpanded((value) => !value)}>
+          {expanded ? "收起路线" : `展开全部 ${stops.length} 站`}
+        </button>
+      )}
+      <div className="xiaotuan-route-actions">
+        <button type="button" onClick={() => onFeedback(1, routeView)} disabled={loading}>喜欢</button>
+        <button type="button" onClick={() => onFeedback(-1, routeView)} disabled={loading}>不合适</button>
+      </div>
+      {isLatest && (
+        <div className="xiaotuan-inline-adjust">
+          <div>
+            {quickAdjustments.map((item) => (
+              <button key={item} type="button" onClick={() => submit(item)} disabled={loading}>{item}</button>
+            ))}
+          </div>
+          <label>
+            <input
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") submit();
+              }}
+              placeholder="继续调整这条路线"
+            />
+            <button type="button" onClick={() => submit()} disabled={loading || !draft.trim()}>
+              {loading ? "调整中" : "调整"}
+            </button>
+          </label>
+        </div>
+      )}
+    </article>
+  );
+}
+
+function XiaotuanScene({ scenario, routeIntent, conversation, onAsk, onOpen, onFeedback, onAdjust, loading, loadingLabel }) {
+  const [draft, setDraft] = useState("");
+  const hasMissingSlots = (routeIntent?.missing_slots?.length || routeIntent?.detected_slots?.missing_slots?.length || 0) > 0;
+  const inConversation = conversation.length > 0 || Boolean(routeIntent) || loading;
+  const smartRouteLoading = loading && loadingLabel.includes("SmartRoute");
   const slotLabels = {
     location: "地点/区域",
     time: "时间/时长",
     activities: "活动类型",
   };
-  const status = xiaotuanStatusFor(routeIntent, loading, loadingLabel, plan);
-  const missingSlots = routeIntent?.missing_slots || routeIntent?.detected_slots?.missing_slots || [];
-  const hasMissingSlots = missingSlots.length > 0;
-  const lastUserText = [...conversation].reverse().find((item) => item.role === "user")?.text || "";
-  const statusClickable = (routeIntent?.action === "ask_confirm" && !hasMissingSlots) || (routeIntent?.action === "open_plugin" && plan);
+  const lastRouteMessageId = [...conversation].reverse().find((item) => item.type === "route_result")?.id;
 
   useEffect(() => {
     setDraft("");
   }, [scenario.query]);
 
-  function submit() {
+  function submitDraft() {
     const trimmed = draft.trim();
     if (!trimmed) return;
     onAsk(trimmed);
     setDraft("");
-  }
-
-  function openStatusTarget() {
-    if (routeIntent?.action === "open_plugin" && plan) {
-      onViewRoute();
-      return;
-    }
-    if (routeIntent?.action === "ask_confirm" && !hasMissingSlots) {
-      onOpen(routeIntent.merged_query || routeIntent.planning_query || lastUserText || draft);
-    }
   }
 
   return (
@@ -758,63 +843,75 @@ function XiaotuanScene({ scenario, routeIntent, plan, conversation = [], onAsk, 
       </div>
 
       <div className="xiaotuan-chat-body">
-        {lastUserText && (
-          <div className="xiaotuan-user-row">
-            <div className="xiaotuan-user-bubble">{lastUserText}</div>
-          </div>
-        )}
+        {conversation.map((item) => {
+          if (item.type === "route_result") {
+            return (
+              <InlineRouteResultCard
+                key={item.id}
+                message={item}
+                isLatest={item.id === lastRouteMessageId}
+                onFeedback={onFeedback}
+                onAdjust={onAdjust}
+                loading={loading}
+              />
+            );
+          }
+          if (item.type === "adjustment_result") {
+            return <InlineAdjustmentResultCard key={item.id} adjustment={item.adjustment} />;
+          }
+          if (item.role === "user") {
+            return (
+              <div key={item.id} className="xiaotuan-user-row">
+                <div className="xiaotuan-user-bubble">{item.text}</div>
+              </div>
+            );
+          }
+          return (
+            <div key={item.id} className="xiaotuan-other-card">
+              <strong>小团</strong>
+              <p>{item.text}</p>
+            </div>
+          );
+        })}
 
-        {status && (
-          <button
-            className={`xiaotuan-analysis ${status.tone}`}
-            onClick={openStatusTarget}
-            disabled={loading || !statusClickable}
-            title={status.detail}
-          >
-            <span>{status.label}</span>
+        {loading && (loadingLabel.includes("小团") || loadingLabel.includes("SmartRoute") || loadingLabel.includes("规划")) && (
+          <button className="xiaotuan-analysis thinking" type="button" disabled>
+            <span>{smartRouteLoading ? "已调用 SmartRoute" : (loadingLabel || "分析中")}</span>
             <b>›</b>
           </button>
         )}
 
-        {hasMissingSlots && (
-          <div className="xiaotuan-slot-note">
-            还需要确认：{missingSlots.map((slot) => slotLabels[slot] || slot).join("、")}
-          </div>
+        {routeIntent && routeIntent.action !== "open_plugin" && (
+          <>
+            <button className={`xiaotuan-analysis ${routeIntent.action === "normal_answer" ? "normal" : "confirm"}`} type="button" disabled>
+              <span>{routeIntent.action === "normal_answer" ? "已转普通小团回答" : "需要继续确认"}</span>
+              <b>›</b>
+            </button>
+            {hasMissingSlots && (
+              <div className="xiaotuan-slot-note">
+                还需要确认：{(routeIntent.missing_slots || routeIntent.detected_slots?.missing_slots || []).map((slot) => slotLabels[slot] || slot).join("、")}
+              </div>
+            )}
+            {routeIntent.clarification_options?.length > 0 && (
+              <div className="xiaotuan-inline-actions">
+                {routeIntent.clarification_options.map((option) => (
+                  <button key={option} onClick={() => onAsk(option, "chip")} disabled={loading}>{option}</button>
+                ))}
+              </div>
+            )}
+            {routeIntent.action === "ask_confirm" && !hasMissingSlots && (
+              <div className="xiaotuan-inline-actions">
+                <button onClick={() => onOpen(routeIntent.merged_query || routeIntent.planning_query)} disabled={loading}>排路线</button>
+                <button disabled={loading}>只看推荐</button>
+              </div>
+            )}
+          </>
         )}
 
-        {routeIntent?.clarification_question && (
-          <div className="xiaotuan-other-card">
-            <strong>小团需要确认</strong>
-            <p>{routeIntent.clarification_question}</p>
-          </div>
-        )}
-
-        {routeIntent?.clarification_options?.length > 0 && (
-          <div className="xiaotuan-inline-actions">
-            {routeIntent.clarification_options.map((option) => (
-              <button key={option} onClick={() => onAsk(option, "chip")} disabled={loading}>{option}</button>
-            ))}
-          </div>
-        )}
-
-        {routeIntent?.action === "ask_confirm" && !hasMissingSlots && (
-          <div className="xiaotuan-inline-actions">
-            <button onClick={() => onOpen(routeIntent.merged_query || routeIntent.planning_query || lastUserText || draft)} disabled={loading}>排路线</button>
-            <button disabled={loading}>只看推荐</button>
-          </div>
-        )}
-
-        {routeIntent?.action === "normal_answer" && (
-          <div className="xiaotuan-other-card">
-            <strong>其他能力处理</strong>
-            <p>{routeIntent.reason || "这个问题先由普通小团回答；如果你想串成路线，可以继续让 SmartRoute 接手。"}</p>
-          </div>
-        )}
-
-        {!lastUserText && !status && (
+        {!inConversation && (
           <div className="xiaotuan-empty-prompts">
-            {["深圳湾公园附近有什么好玩的", "云南大学玩3个小时", "中国美术馆附近逛街吃饭"].map((item) => (
-              <button key={item} onClick={() => setDraft(item)}>{item}</button>
+            {["附近有什么好吃的", "深圳大学附近下午3小时怎么玩", "广州永庆坊逛吃3小时"].map((item) => (
+              <button key={item} onClick={() => setDraft(item)}>✦ {item}</button>
             ))}
           </div>
         )}
@@ -829,12 +926,12 @@ function XiaotuanScene({ scenario, routeIntent, plan, conversation = [], onAsk, 
             onKeyDown={(event) => {
               if (event.key === "Enter") {
                 event.preventDefault();
-                submit();
+                submitDraft();
               }
             }}
-            placeholder="发消息或按住说话"
+            placeholder={inConversation ? "继续补充或调整路线" : "发消息或按住说话"}
           />
-          <button onClick={submit} disabled={loading || !draft.trim()} title="发送">↑</button>
+          <button onClick={submitDraft} disabled={loading || !draft.trim()} title="发送">↑</button>
         </div>
       </div>
     </div>
@@ -1319,8 +1416,6 @@ function PhoneExperience({
   xiaotuanConversation,
   onOpenRoute,
   onAskXiaotuan,
-  onViewRoute,
-  onOpenXiaotuanScene,
   profileMode,
   profileSource,
   profileSources,
@@ -1332,6 +1427,8 @@ function PhoneExperience({
   onReplace,
   onFeedback,
   onAdjust,
+  onXiaotuanFeedback,
+  onXiaotuanAdjust,
   adjustmentHistory,
   latestAdjustment,
   loadingLabel,
@@ -1368,23 +1465,16 @@ function PhoneExperience({
         <span>5G</span>
       </div>
       <div className="phone-content meituan-shell">
-        {scenario.id === "search" && (
-          <SearchScene
-            scenario={scenario}
-            onOpen={onOpenRoute}
-            onOpenXiaotuan={onOpenXiaotuanScene}
-            loading={loading}
-          />
-        )}
+        {scenario.id === "search" && <SearchScene scenario={scenario} onOpen={onOpenRoute} loading={loading} />}
         {scenario.id === "xiaotuan" && (
           <XiaotuanScene
             scenario={scenario}
             routeIntent={routeIntent}
-            plan={plan}
             conversation={xiaotuanConversation}
             onAsk={onAskXiaotuan}
             onOpen={onOpenRoute}
-            onViewRoute={onViewRoute}
+            onFeedback={onXiaotuanFeedback}
+            onAdjust={onXiaotuanAdjust}
             loading={loading}
             loadingLabel={loadingLabel}
           />
@@ -1907,8 +1997,8 @@ export default function App() {
   const [activeScenarioId, setActiveScenarioId] = useState("search");
   const [phoneMode, setPhoneMode] = useState("entry");
   const [routeIntent, setRouteIntent] = useState(null);
-  const [xiaotuanConversation, setXiaotuanConversation] = useState([]);
   const [xiaotuanPendingIntent, setXiaotuanPendingIntent] = useState(null);
+  const [xiaotuanConversation, setXiaotuanConversation] = useState([]);
   const [profileMode, setProfileMode] = useState("文艺体验型");
   const [profileSource, setProfileSource] = useState("preset");
   const [profileSources, setProfileSources] = useState(null);
@@ -1978,22 +2068,44 @@ export default function App() {
       if (openRoute) {
         setPhoneMode("route");
       }
+      return payload;
     } catch (err) {
       setError(err.message || "生成失败");
+      return null;
     } finally {
       setLoading(false);
       setLoadingLabel("");
     }
   }
 
-  async function requestPlanWithPreference(nextQuery, explicitContext = null, label = "规划中", openRoute = true) {
+  function appendXiaotuanRouteResult(payload, sourceQuery) {
+    const routeView = payload?.routes?.[0] || null;
+    setXiaotuanConversation((items) => [
+      ...items,
+      {
+        id: `r-${Date.now()}`,
+        role: "assistant",
+        type: "route_result",
+        text: routeView ? `已生成路线：${routeView.route.title}` : "当前没有生成完整路线",
+        query: sourceQuery,
+        plan: payload,
+        routeView,
+      },
+    ]);
+  }
+
+  async function requestPlanWithPreference(nextQuery, explicitContext = null, label = "规划中", openRoute = true, inlineXiaotuan = false) {
     const nextContext = contextForScenario(activeScenario, nextQuery, explicitContext);
     if (!sessionProfileReady) {
-      setPendingPlan({ query: nextQuery, context: nextContext, label, openRoute });
+      setPendingPlan({ query: nextQuery, context: nextContext, label, openRoute, inlineXiaotuan });
       setPreferenceModalOpen(true);
-      return;
+      return null;
     }
-    await generatePlan(nextQuery, openRoute, profileMode, label, profileSource, importedProfileId, nextContext);
+    const payload = await generatePlan(nextQuery, openRoute, profileMode, label, profileSource, importedProfileId, nextContext);
+    if (inlineXiaotuan && payload) {
+      appendXiaotuanRouteResult(payload, nextQuery);
+    }
+    return payload;
   }
 
   async function submitJudgePreference(answers) {
@@ -2001,6 +2113,8 @@ export default function App() {
       query: query || activeScenario.query,
       context: activeRouteContext,
       label: "评委画像规划中",
+      openRoute: true,
+      inlineXiaotuan: false,
     };
     const { profile, transportStrategy } = buildJudgeProfilePayload(answers, activeScenario, pending.context);
     const nextContext = {
@@ -2020,7 +2134,18 @@ export default function App() {
       setPreferenceModalOpen(false);
       setPendingPlan(null);
       setFeedbackStatus("已生成评委即时画像，本次路线会按这些偏好规划。");
-      await generatePlan(pending.query, pending.openRoute ?? true, profileMode, pending.label || "评委画像规划中", "manual_import", nextProfileId, nextContext);
+      const payload = await generatePlan(
+        pending.query,
+        pending.openRoute ?? true,
+        profileMode,
+        pending.label || "评委画像规划中",
+        "manual_import",
+        nextProfileId,
+        nextContext,
+      );
+      if (pending.inlineXiaotuan && payload) {
+        appendXiaotuanRouteResult(payload, pending.query);
+      }
     } catch (err) {
       setError(err.message || "评委画像生成失败");
     } finally {
@@ -2034,11 +2159,25 @@ export default function App() {
       query: query || activeScenario.query,
       context: activeRouteContext,
       label: "规划中",
+      openRoute: true,
+      inlineXiaotuan: false,
     };
     setSessionProfileReady(true);
     setPreferenceModalOpen(false);
     setPendingPlan(null);
-    generatePlan(pending.query, pending.openRoute ?? true, profileMode, pending.label || "规划中", profileSource, importedProfileId, pending.context);
+    generatePlan(
+      pending.query,
+      pending.openRoute ?? true,
+      profileMode,
+      pending.label || "规划中",
+      profileSource,
+      importedProfileId,
+      pending.context,
+    ).then((payload) => {
+      if (pending.inlineXiaotuan && payload) {
+        appendXiaotuanRouteResult(payload, pending.query);
+      }
+    });
   }
 
   function selectScenario(scenario) {
@@ -2115,7 +2254,8 @@ export default function App() {
     if (!trimmed) return;
     const previousIntent = xiaotuanPendingIntent
       || ((routeIntent?.turn_state === "collecting_slots" || routeIntent?.missing_slots?.length > 0) ? routeIntent : null);
-    setQuery(previousIntent?.merged_query || previousIntent?.planning_query || trimmed);
+    const previousQuery = previousIntent?.merged_query || previousIntent?.planning_query || "";
+    setQuery(previousQuery || trimmed);
     setLoading(true);
     setLoadingLabel("小团识别中");
     setError("");
@@ -2130,7 +2270,7 @@ export default function App() {
         context: {
           entry: "问小团",
           current_city: inferCityHint(trimmed)
-            || inferCityHint(previousIntent?.merged_query || previousIntent?.planning_query || "")
+            || inferCityHint(previousQuery)
             || activeRouteContext?.city_hint
             || activeScenario.routeContext?.city_hint
             || APP_CURRENT_CITY,
@@ -2156,7 +2296,18 @@ export default function App() {
           anchor_text: payload.filled_slots?.location || inferAnchorText(planningQuery),
         });
         setXiaotuanPendingIntent(null);
-        await generatePlan(planningQuery, true, profileMode, "SmartRoute 调用中", profileSource, importedProfileId, nextContext);
+        const routePayload = await generatePlan(
+          planningQuery,
+          false,
+          profileMode,
+          "SmartRoute 调用中",
+          profileSource,
+          importedProfileId,
+          nextContext,
+        );
+        if (routePayload) {
+          appendXiaotuanRouteResult(routePayload, planningQuery);
+        }
       }
     } catch (err) {
       setError(err.message || "意图识别失败");
@@ -2166,7 +2317,29 @@ export default function App() {
     }
   }
 
-  async function adjustRoute(instruction) {
+  async function openXiaotuanInlineRoute(nextQuery, explicitContext = null) {
+    const planningQuery = nextQuery || routeIntent?.merged_query || routeIntent?.planning_query || query;
+    const nextContext = contextForScenario(activeScenario, planningQuery, {
+      source: "xiaotuan",
+      city_hint: inferCityHint(planningQuery) || activeRouteContext?.city_hint || activeScenario.routeContext?.city_hint || APP_CURRENT_CITY,
+      anchor_text: routeIntent?.filled_slots?.location || inferAnchorText(planningQuery),
+      ...(explicitContext || {}),
+    });
+    const routePayload = await generatePlan(
+      planningQuery,
+      false,
+      profileMode,
+      "SmartRoute 调用中",
+      profileSource,
+      importedProfileId,
+      nextContext,
+    );
+    if (routePayload) {
+      appendXiaotuanRouteResult(routePayload, planningQuery);
+    }
+  }
+
+  async function adjustRoute(instruction, options = {}) {
     if (!selectedRouteView || !plan) return;
     setLoading(true);
     setLoadingLabel("局部调整中");
@@ -2204,21 +2377,57 @@ export default function App() {
         ...items,
         `${payload.adjustment_history_item}（等位 ${metricDelta(deltas.total_wait_minutes)} / 人均 ${metricDelta(deltas.total_cost_per_person, "¥")} / 移动 ${metricDelta(deltas.total_transit_minutes)}）`,
       ]);
+      if (options.appendToXiaotuan) {
+        setXiaotuanConversation((items) => [
+          ...items,
+          {
+            id: `adj-${Date.now()}`,
+            role: "assistant",
+            type: "adjustment_result",
+            text: payload.adjustment_summary,
+            adjustment: payload,
+          },
+          {
+            id: `r-${Date.now() + 1}`,
+            role: "assistant",
+            type: "route_result",
+            text: `已调整路线：${payload.route.route.title}`,
+            query: plan.query || query,
+            plan: {
+              ...plan,
+              routes: nextRoutes,
+              planning_time_ms: payload.planning_time_ms,
+              follow_up_question: payload.follow_up_question,
+              follow_up: payload.follow_up,
+              constraint_conflicts: payload.constraint_conflicts,
+              route_completeness: payload.route_completeness,
+            },
+            routeView: payload.route,
+          },
+        ]);
+      }
+      return payload;
     } catch (err) {
       setError(err.message || "调整失败");
+      return null;
     } finally {
       setLoading(false);
       setLoadingLabel("");
     }
   }
 
-  async function sendFeedback(value) {
-    if (!selectedRouteView) return;
+  function adjustRouteFromXiaotuan(instruction) {
+    return adjustRoute(instruction, { appendToXiaotuan: true });
+  }
+
+  async function sendFeedback(value, routeViewOverride = null) {
+    const targetRouteView = routeViewOverride || selectedRouteView;
+    if (!targetRouteView) return;
     setFeedbackStatus("写入中...");
     try {
       await postJson("/api/feedback", {
         user_id: USER_ID,
-        route: selectedRouteView.route,
+        route: targetRouteView.route,
         feedback: value,
       });
       setFeedbackStatus(value === 1 ? "已记录喜欢，下次会提高相似 POI 权重。" : "已记录不合适，下次会降低相似路线。");
@@ -2307,11 +2516,13 @@ export default function App() {
           xiaotuanConversation={xiaotuanConversation}
           routeIntent={routeIntent}
           onOpenRoute={(nextQuery, explicitContext) => {
+            if (activeScenario.id === "xiaotuan") {
+              openXiaotuanInlineRoute(nextQuery, explicitContext);
+              return;
+            }
             requestPlanWithPreference(nextQuery, explicitContext, "规划中");
           }}
           onAskXiaotuan={askXiaotuan}
-          onViewRoute={() => setPhoneMode("route")}
-          onOpenXiaotuanScene={() => selectScenario(SCENARIOS.find((scenario) => scenario.id === "xiaotuan") || activeScenario)}
           profileMode={profileMode}
           profileSource={profileSource}
           profileSources={profileSources}
@@ -2323,6 +2534,8 @@ export default function App() {
           onReplace={openReplace}
           onFeedback={sendFeedback}
           onAdjust={adjustRoute}
+          onXiaotuanFeedback={sendFeedback}
+          onXiaotuanAdjust={adjustRouteFromXiaotuan}
           adjustmentHistory={adjustmentHistory}
           latestAdjustment={latestAdjustment}
           loadingLabel={loadingLabel}
