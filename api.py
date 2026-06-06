@@ -239,6 +239,17 @@ class AdjustResponse(BaseModel):
     tool_trace: list[AgentTraceStep] = Field(default_factory=list)
 
 
+@dataclass
+class AdjustmentIntent:
+    kind: str
+    categories: set[POICategory] | None = None
+    target_index: int | None = None
+    target_text: str | None = None
+    max_count: int | None = None
+    source: str = "rules"
+    reason: str = "规则兜底识别调整目标"
+
+
 class ManualProfileImportRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -1434,6 +1445,18 @@ def adjustment_status_for(
     return "applied"
 
 
+def adjustment_intent_satisfied(intent: AdjustmentIntent, route: Route) -> bool:
+    if intent.kind == "avoid_stop" and intent.target_text:
+        target = intent.target_text.lower()
+        return all(target not in stop.poi.name.lower() for stop in route.stops)
+    if intent.kind == "avoid_category" and intent.categories:
+        return all(stop.poi.category not in intent.categories for stop in route.stops)
+    if intent.kind == "reduce_category" and intent.categories:
+        count = sum(1 for stop in route.stops if stop.poi.category in intent.categories)
+        return count <= (intent.max_count if intent.max_count is not None else 1)
+    return True
+
+
 def suggested_relaxations_for(
     kind: str,
     status: Literal["applied", "partial", "not_applied"],
@@ -1478,6 +1501,138 @@ def detect_adjustment_kind(instruction: str) -> tuple[str, set[POICategory] | No
     return "wait", None
 
 
+CATEGORY_ALIASES: dict[POICategory, list[str]] = {
+    POICategory.RESTAURANT: ["吃饭", "晚饭", "午饭", "正餐", "餐厅", "餐饮", "吃的", "美食", "火锅", "小吃"],
+    POICategory.CAFE: ["咖啡", "咖啡馆", "咖啡店", "喝咖啡", "下午茶", "奶茶", "甜品", "茶饮"],
+    POICategory.ATTRACTION: ["展览", "看展", "景点", "公园", "博物馆", "美术馆", "文化"],
+    POICategory.ENTERTAINMENT: ["娱乐", "电影", "酒吧", "演出", "live", "ktv", "密室"],
+    POICategory.SHOPPING: ["购物", "逛街", "商场", "市集", "买东西"],
+}
+
+
+NEGATIVE_ADJUSTMENT_TERMS = ["不想", "不要", "别", "不去", "去掉", "删掉", "移除", "换掉", "避开", "不喝", "不吃"]
+REDUCE_ADJUSTMENT_TERMS = ["少安排", "少一点", "少点", "不要两家", "不要多个", "别太多", "减少"]
+
+
+def mentioned_categories(instruction: str) -> set[POICategory]:
+    text = instruction.lower()
+    categories: set[POICategory] = set()
+    for category, aliases in CATEGORY_ALIASES.items():
+        if any(alias.lower() in text for alias in aliases):
+            categories.add(category)
+    return categories
+
+
+def has_negative_adjustment(instruction: str) -> bool:
+    text = instruction.lower()
+    return any(term in text for term in NEGATIVE_ADJUSTMENT_TERMS)
+
+
+def has_reduce_adjustment(instruction: str) -> bool:
+    text = instruction.lower()
+    return any(term in text for term in REDUCE_ADJUSTMENT_TERMS)
+
+
+def choose_category_target(route: Route, categories: set[POICategory]) -> int | None:
+    matches = [
+        (index, stop.wait_minutes, stop.poi.price_per_person)
+        for index, stop in enumerate(route.stops)
+        if stop.poi.category in categories
+    ]
+    if not matches:
+        return None
+    return max(matches, key=lambda item: (item[1], item[2]))[0]
+
+
+def mentioned_stop_index(route: Route, instruction: str) -> int | None:
+    text = instruction.strip().lower()
+    if not any(word in text for word in ["不想去", "不要去", "别去", "不去", "去掉", "删掉", "移除", "换掉", "避开"]):
+        return None
+
+    phrases = [
+        "我不想去",
+        "不想去",
+        "不要去",
+        "别去",
+        "不去",
+        "去掉",
+        "删掉",
+        "移除",
+        "换掉",
+        "避开",
+        "这个",
+        "这家",
+        "那家",
+        "那个",
+    ]
+    keyword = text
+    for phrase in phrases:
+        keyword = keyword.replace(phrase, " ")
+    keyword = re.sub(r"[，。,.!！?？、；;：:\s]+", " ", keyword).strip()
+    tokens = [token for token in keyword.split(" ") if len(token) >= 2]
+
+    best_index: int | None = None
+    best_score = 0
+    for index, stop in enumerate(route.stops):
+        searchable = " ".join(
+            [
+                stop.poi.name,
+                stop.poi.address,
+                stop.poi.district,
+                stop.poi.category.value,
+                *stop.poi.tags,
+            ]
+        ).lower()
+        score = 0
+        for token in tokens:
+            if token in searchable:
+                score += len(token)
+        if score > best_score:
+            best_score = score
+            best_index = index
+
+    return best_index if best_score > 0 else None
+
+
+def parse_adjustment_intent(
+    instruction: str,
+    route: Route,
+    llm_adjustment: tuple[str, set[POICategory] | None, str, str] | None = None,
+) -> AdjustmentIntent:
+    mentioned_index = mentioned_stop_index(route, instruction)
+    if mentioned_index is not None:
+        stop = route.stops[mentioned_index]
+        return AdjustmentIntent(
+            kind="avoid_stop",
+            categories={stop.poi.category},
+            target_index=mentioned_index,
+            target_text=stop.poi.name,
+            source="rules",
+            reason=f"命中用户不想去的站点：{stop.poi.name}",
+        )
+
+    categories = mentioned_categories(instruction)
+    if categories and (has_negative_adjustment(instruction) or has_reduce_adjustment(instruction)):
+        target_index = choose_category_target(route, categories)
+        reduce_only = has_reduce_adjustment(instruction) and not has_negative_adjustment(instruction)
+        return AdjustmentIntent(
+            kind="reduce_category" if reduce_only else "avoid_category",
+            categories=categories,
+            target_index=target_index,
+            target_text="、".join(category.value for category in categories),
+            max_count=1 if reduce_only else 0,
+            source="rules",
+            reason=f"命中用户不想要的类型：{'、'.join(category.value for category in categories)}",
+        )
+
+    if llm_adjustment:
+        kind, categories, source, reason = llm_adjustment
+        return AdjustmentIntent(kind=kind, categories=categories, source=source, reason=reason)
+
+    kind, categories = detect_adjustment_kind(instruction)
+    return AdjustmentIntent(kind=kind, categories=categories)
+
+
 def distance_around(route: Route, index: int, poi: POI) -> float:
     distance = 0.0
     if index > 0:
@@ -1499,7 +1654,11 @@ def find_adjustment_candidate(
     current_ids = {stop.poi.id for stop in route.stops}
     target_stop = route.stops[target_index]
     category_filter = categories or {target_stop.poi.category}
-    options = [poi for poi, _ in candidates if poi.id not in current_ids and poi.category in category_filter]
+    if kind in {"avoid_stop", "avoid_category", "reduce_category"}:
+        avoid_categories = categories or {target_stop.poi.category}
+        options = [poi for poi, _ in candidates if poi.id not in current_ids and poi.category not in avoid_categories]
+    else:
+        options = [poi for poi, _ in candidates if poi.id not in current_ids and poi.category in category_filter]
     if not options:
         return None
     if kind == "cheaper":
@@ -1518,6 +1677,16 @@ def find_adjustment_candidate(
         if not closer:
             return None
         return sorted(closer, key=lambda poi: (distance_around(route, target_index, poi), poi.avg_wait_minutes, -poi.rating))[0]
+    if kind in {"avoid_stop", "avoid_category", "reduce_category"}:
+        return sorted(
+            options,
+            key=lambda poi: (
+                distance_around(route, target_index, poi),
+                poi.avg_wait_minutes,
+                -poi.rating,
+                poi.price_per_person,
+            ),
+        )[0]
     return sorted(options, key=lambda poi: (poi.avg_wait_minutes, -poi.rating, poi.price_per_person))[0]
 
 
@@ -1561,6 +1730,12 @@ def adjustment_summary(
     if kind == "wait":
         wait_delta = abs(deltas.total_wait_minutes) if deltas else 0
         return f"已根据“{instruction}”将高等待站点替换为 {target}，总等待减少约 {wait_delta} 分钟。"
+    if kind == "avoid_stop":
+        return f"已根据“{instruction}”避开指定站点，并替换为 {target}，保持路线仍可执行。"
+    if kind == "avoid_category":
+        return f"已根据“{instruction}”避开指定类型，并替换为 {target}，保持路线仍可执行。"
+    if kind == "reduce_category":
+        return f"已根据“{instruction}”减少指定类型站点，并替换为 {target}，保持路线仍可执行。"
     return f"已根据“{instruction}”加入或替换为 {target}，保持路线仍可执行。"
 
 
@@ -1984,14 +2159,16 @@ def adjust_route(request: AdjustRequest) -> AdjustResponse:
     candidates = apply_context_to_candidates(candidates, meituan_context)
 
     llm_adjustment = classify_adjustment_with_deepseek(request.instruction, request.route)
-    if llm_adjustment:
-        kind, categories, adjustment_source, adjustment_reason = llm_adjustment
+    adjustment_intent = parse_adjustment_intent(request.instruction, request.route, llm_adjustment)
+    kind = adjustment_intent.kind
+    categories = adjustment_intent.categories
+    adjustment_source = adjustment_intent.source
+    adjustment_reason = adjustment_intent.reason
+    target_index = adjustment_intent.target_index if adjustment_intent.target_index is not None else choose_adjustment_target(request.route, kind)
+    if adjustment_intent.target_index is None and kind in {"avoid_category", "reduce_category"}:
+        candidate = None
     else:
-        kind, categories = detect_adjustment_kind(request.instruction)
-        adjustment_source = "rules"
-        adjustment_reason = "规则兜底识别调整目标"
-    target_index = choose_adjustment_target(request.route, kind)
-    candidate = find_adjustment_candidate(request.route, candidates, kind, target_index, categories)
+        candidate = find_adjustment_candidate(request.route, candidates, kind, target_index, categories)
     before_metrics = route_metrics(request.route)
     next_pois = [stop.poi for stop in request.route.stops]
     should_rebuild_route = kind == "walk" or candidate is not None
@@ -2032,6 +2209,8 @@ def adjust_route(request: AdjustRequest) -> AdjustResponse:
     status = adjustment_status_for(kind, request.route, adjusted_route, changed_stops, deltas, candidate)
     if route_build_failed:
         status = "not_applied"
+    elif status == "applied" and not adjustment_intent_satisfied(adjustment_intent, adjusted_route):
+        status = "partial"
 
     changed_name = candidate.name if candidate else None
     summary = adjustment_summary(kind, request.instruction, changed_name, status, deltas)

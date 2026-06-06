@@ -495,6 +495,67 @@ def test_adjust_api_updates_route_with_explanation():
     assert [step["tool"] for step in payload["tool_trace"]][:2] == ["ParseAdjustment", "SearchReplacementPOI"]
 
 
+def test_adjust_api_replaces_mentioned_unwanted_stop():
+    client = TestClient(app)
+    query = "云南大学附近玩3小时，要有吃饭和散步"
+    plan_payload = client.post(
+        "/api/plan",
+        json={"query": query, "user_id": "adjust-mentioned-stop-user", "profile_mode": "文艺体验型"},
+    ).json()
+    route = plan_payload["routes"][0]["route"]
+    route["stops"][0]["poi"]["name"] = "云南大学研究院"
+
+    adjust_response = client.post(
+        "/api/adjust",
+        json={
+            "query": query,
+            "instruction": "我不想去研究院",
+            "route": route,
+            "user_id": "adjust-mentioned-stop-user",
+            "profile_mode": "文艺体验型",
+        },
+    )
+
+    assert adjust_response.status_code == 200
+    payload = adjust_response.json()
+    assert payload["adjustment_status"] in {"applied", "partial"}
+    after_names = [stop["poi"]["name"] for stop in payload["route"]["route"]["stops"]]
+    assert "云南大学研究院" not in after_names
+    assert payload["changed_stops"]
+
+
+def test_adjust_api_avoids_unwanted_category():
+    client = TestClient(app)
+    query = "云南大学附近玩3小时，要有咖啡和散步"
+    plan_payload = client.post(
+        "/api/plan",
+        json={"query": query, "user_id": "adjust-unwanted-category-user", "profile_mode": "文艺体验型"},
+    ).json()
+    route = plan_payload["routes"][0]["route"]
+    route["stops"][0]["poi"]["name"] = "云南大学附近咖啡馆"
+    route["stops"][0]["poi"]["category"] = "咖啡/茶饮"
+    for stop in route["stops"][1:]:
+        if stop["poi"]["category"] == "咖啡/茶饮":
+            stop["poi"]["category"] = "景点"
+
+    adjust_response = client.post(
+        "/api/adjust",
+        json={
+            "query": query,
+            "instruction": "我不想喝咖啡",
+            "route": route,
+            "user_id": "adjust-unwanted-category-user",
+            "profile_mode": "文艺体验型",
+        },
+    )
+
+    assert adjust_response.status_code == 200
+    payload = adjust_response.json()
+    assert payload["adjustment_status"] in {"applied", "partial"}
+    after_categories = [stop["poi"]["category"] for stop in payload["route"]["route"]["stops"]]
+    assert "咖啡/茶饮" not in after_categories
+
+
 def test_adjust_api_does_not_fake_improvement_when_no_better_option():
     client = TestClient(app)
     query = "帮我规划一个上海外滩附近的文艺下午，时间3小时，两个人，预算200，不想排队"
