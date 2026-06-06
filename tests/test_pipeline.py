@@ -82,3 +82,55 @@ def test_route_planner_allows_explicit_coffee_hopping():
     assert routes
     categories = [stop.poi.category for stop in routes[0].stops]
     assert categories.count(POICategory.CAFE) >= 2
+
+
+def test_route_planner_caps_restaurants_for_realistic_afternoon():
+    pois = [
+        make_test_poi("陈添记西关老字号", POICategory.RESTAURANT, 1, price=85, rating=4.9),
+        make_test_poi("东湖酒楼粤菜老字号", POICategory.RESTAURANT, 2, price=110, rating=4.8),
+        make_test_poi("凤小馆顺德菜", POICategory.RESTAURANT, 3, price=95, rating=4.7),
+        make_test_poi("永庆坊街角茶饮", POICategory.CAFE, 4, price=35, rating=4.5),
+        make_test_poi("粤剧艺术博物馆", POICategory.ATTRACTION, 5, price=20, rating=4.6),
+        make_test_poi("永庆坊历史街区", POICategory.SHOPPING, 6, price=20, rating=4.5),
+    ]
+    intent = IntentParserAgent().parse("我想在广州永庆坊附近逛3个小时，想喝点东西但不要连续安排咖啡馆，最好有一个文化点和一个适合散步的地方")
+    candidates = [(poi, 8.0 - index * 0.1) for index, poi in enumerate(pois)]
+    routes = RoutePlannerAgent({poi.id: poi for poi in pois}).plan(intent, candidates, n_routes=1)
+
+    assert routes
+    categories = [stop.poi.category for stop in routes[0].stops]
+    assert categories.count(POICategory.RESTAURANT) <= 1
+    assert categories.count(POICategory.CAFE) == 1
+    assert any(category in {POICategory.ATTRACTION, POICategory.ENTERTAINMENT} for category in categories)
+    assert any(category == POICategory.SHOPPING for category in categories)
+
+
+def test_route_planner_does_not_pad_route_with_multiple_restaurants():
+    pois = [
+        make_test_poi("陈添记西关老字号", POICategory.RESTAURANT, 1, price=85, rating=4.9),
+        make_test_poi("东湖酒楼粤菜老字号", POICategory.RESTAURANT, 2, price=110, rating=4.8),
+        make_test_poi("凤小馆顺德菜", POICategory.RESTAURANT, 3, price=95, rating=4.7),
+        make_test_poi("珠影市三宫影城", POICategory.ENTERTAINMENT, 4, price=50, rating=4.6),
+    ]
+    intent = IntentParserAgent().parse("我想在广州永庆坊附近逛3个小时，想喝点东西，有文化点和散步地方")
+    candidates = [(poi, 8.0 - index * 0.1) for index, poi in enumerate(pois)]
+    routes = RoutePlannerAgent({poi.id: poi for poi in pois}).plan(intent, candidates, n_routes=1)
+
+    assert routes == []
+
+
+def test_route_planner_allows_explicit_restaurant_hopping():
+    pois = [
+        make_test_poi("老字号粤菜一店", POICategory.RESTAURANT, 1, price=90, rating=4.8),
+        make_test_poi("老字号粤菜二店", POICategory.RESTAURANT, 2, price=95, rating=4.7),
+        make_test_poi("永庆坊街区文化点", POICategory.ATTRACTION, 3, price=20, rating=4.6),
+        make_test_poi("永庆坊街角茶饮", POICategory.CAFE, 4, price=35, rating=4.5),
+    ]
+    intent = IntentParserAgent().parse("广州永庆坊粤菜探店4小时，想吃两家老字号")
+    candidates = [(poi, 7.0 - index * 0.1) for index, poi in enumerate(pois)]
+    routes = RoutePlannerAgent({poi.id: poi for poi in pois}).plan(intent, candidates, n_routes=1)
+
+    assert routes
+    categories = [stop.poi.category for stop in routes[0].stops]
+    assert categories.count(POICategory.RESTAURANT) >= 2
+    assert any(category in {POICategory.ATTRACTION, POICategory.ENTERTAINMENT} for category in categories)

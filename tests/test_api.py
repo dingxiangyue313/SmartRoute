@@ -27,7 +27,7 @@ def test_plan_api_returns_real_routes():
     assert categories.intersection({"景点", "娱乐"})
     hits = payload["routes"][0]["insight"]["constraint_hits"]
     assert ">=3 POI" in hits
-    assert "餐饮+文化/娱乐覆盖" in hits
+    assert "餐饮+文化/娱乐/散步覆盖" in hits
 
 
 def test_unknown_poi_prompt_returns_complete_route():
@@ -171,6 +171,71 @@ def test_short_xiaotuan_place_query_extracts_anchor_from_planning_phrase(monkeyp
     assert payload["intent"]["extracted_preferences"]["anchor_text"] == "万象天地"
     assert payload["intent"]["extracted_preferences"]["anchor_source"] == "fake_poi_text"
     assert all(stop["poi"]["district"] == "深圳" for stop in payload["routes"][0]["route"]["stops"])
+
+
+def test_live_anchor_does_not_fake_route_with_multiple_restaurants(monkeypatch):
+    def make_amap_poi(name, category, index):
+        return POI(
+            id=f"amap-food-heavy-{index}",
+            name=name,
+            category=category,
+            address="广州永庆坊附近",
+            district="广州",
+            latitude=23.114 + index * 0.001,
+            longitude=113.25 + index * 0.001,
+            rating=4.8 - index * 0.05,
+            review_count=500,
+            price_per_person=80,
+            avg_wait_minutes=8,
+            business_hours={"open": "10:00", "close": "22:00"},
+            tags=[category.value],
+            ugc_summary="高德测试候选",
+            visit_duration_minutes=45,
+            source="amap",
+            distance_from_anchor_meters=200 + index * 80,
+        )
+
+    class FakeAMapClient:
+        enabled = True
+
+        def resolve_anchor(self, text=None, city_hint=None, anchor_location=None):
+            return api.AMapAnchor(
+                text=text or "广州永庆坊",
+                city="广州",
+                location=GeoPoint(latitude=23.114, longitude=113.25),
+                source="fake_poi_text",
+            )
+
+        def search_pois(self, anchor, categories, keywords=None, radius_meters=3000, limit_per_category=8):
+            return [
+                make_amap_poi("陈添记西关老字号", POICategory.RESTAURANT, 1),
+                make_amap_poi("东湖酒楼粤菜老字号", POICategory.RESTAURANT, 2),
+                make_amap_poi("凤小馆顺德菜", POICategory.RESTAURANT, 3),
+                make_amap_poi("珠影市三宫影城", POICategory.ENTERTAINMENT, 4),
+            ]
+
+        def route_segment(self, origin, destination, mode="步行+公交", city=None):
+            return None
+
+        def recent_errors(self):
+            return []
+
+    monkeypatch.setattr(api, "AMapClient", FakeAMapClient)
+    client = TestClient(app)
+    response = client.post(
+        "/api/plan",
+        json={
+            "query": "我想在广州永庆坊附近逛3个小时，想喝点东西，有文化点和散步地方",
+            "user_id": "guangzhou-no-restaurant-padding-user",
+            "route_context": {"source": "xiaotuan", "city_hint": "广州", "anchor_text": "广州永庆坊"},
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["routes"] == []
+    assert any("没有生成可执行路线" in conflict for conflict in payload["constraint_conflicts"])
+    assert all(candidate["poi"]["district"] == "广州" for candidate in payload["candidates"])
 
 
 def test_selected_pois_are_pinned_and_completed():

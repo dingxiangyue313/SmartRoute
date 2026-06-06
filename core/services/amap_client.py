@@ -165,7 +165,7 @@ class AMapClient:
 
         for category in categories:
             type_codes = CATEGORY_TYPE_CODES.get(category, "")
-            query_terms = list(dict.fromkeys([*keywords_for_category(category), *terms]))[:3]
+            query_terms = list(dict.fromkeys([*keywords_for_category(category), *terms]))[:5]
             for keyword in [*query_terms, ""]:
                 try:
                     payload = self._get(
@@ -473,11 +473,11 @@ def sort_by_anchor_distance(pois: list[POI]) -> list[POI]:
 
 def keywords_for_category(category: POICategory) -> list[str]:
     return {
-        POICategory.RESTAURANT: ["美食", "餐厅", "特色菜"],
+        POICategory.RESTAURANT: ["餐厅", "特色菜", "本地风味"],
         POICategory.CAFE: ["咖啡", "下午茶", "茶饮"],
-        POICategory.ATTRACTION: ["景点", "展览", "博物馆"],
-        POICategory.ENTERTAINMENT: ["娱乐", "演出", "电影"],
-        POICategory.SHOPPING: ["商场", "市集", "购物"],
+        POICategory.ATTRACTION: ["文化", "展览", "公园", "博物馆", "艺术馆"],
+        POICategory.ENTERTAINMENT: ["电影", "演出", "娱乐"],
+        POICategory.SHOPPING: ["步行街", "商场", "市集", "购物"],
         POICategory.ACCOMMODATION: ["酒店"],
     }.get(category, ["美食"])
 

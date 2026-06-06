@@ -910,6 +910,21 @@ def unique_categories(categories: list[POICategory]) -> list[POICategory]:
     return ordered[:6]
 
 
+def route_role_keywords(query: str, intent: ParsedIntent) -> list[str]:
+    text = f"{query} {intent.extracted_preferences.get('raw_query', '')}"
+    keywords: list[str] = []
+    rules = [
+        (["文化", "展", "展览", "馆", "博物", "美术", "艺术"], ["文化", "展览", "博物馆", "艺术馆"]),
+        (["散步", "步行", "逛", "街区", "公园", "广场"], ["公园", "步行街", "街区", "广场"]),
+        (["喝点东西", "咖啡", "茶", "甜品", "下午茶"], ["咖啡", "茶饮", "下午茶"]),
+        (["粤菜", "餐厅", "吃饭", "正餐", "晚餐"], ["餐厅", "特色菜", "本地风味"]),
+    ]
+    for triggers, terms in rules:
+        if any(trigger in text for trigger in triggers):
+            keywords.extend(terms)
+    return list(dict.fromkeys(keywords))[:10]
+
+
 def build_dynamic_candidates(
     request: PlanRequest,
     intent: ParsedIntent,
@@ -940,10 +955,14 @@ def build_dynamic_candidates(
 
     radius = 1500 if meituan_context.walk_preference == "少走路" else 3000
     categories = unique_categories(intent.constraints.preferred_categories)
-    query_keywords = [anchor.text, *meituan_context.search_preferences[:3]]
+    query_keywords = [
+        *route_role_keywords(request.query, intent),
+        anchor.text,
+        *meituan_context.search_preferences[:3],
+    ]
     amap_pois = amap_client.search_pois(anchor, categories, keywords=query_keywords, radius_meters=radius)
     if amap_pois:
-        trace_notes.append(f"高德 POI：围绕 {anchor.text} {radius}m 召回 {len(amap_pois)} 个真实候选。")
+        trace_notes.append(f"高德 POI：围绕 {anchor.text} {radius}m 按行程角色召回 {len(amap_pois)} 个真实候选。")
     else:
         amap_error_text = "；".join(amap_client.recent_errors())
         trace_notes.append(
@@ -1113,7 +1132,7 @@ def route_insight(route: Route, intent: ParsedIntent) -> RouteInsight:
 
     categories = {stop.poi.category for stop in route.stops}
     has_meal = bool(categories.intersection({POICategory.RESTAURANT, POICategory.CAFE}))
-    has_culture = bool(categories.intersection({POICategory.ATTRACTION, POICategory.ENTERTAINMENT}))
+    has_culture = bool(categories.intersection({POICategory.ATTRACTION, POICategory.ENTERTAINMENT, POICategory.SHOPPING}))
     route_complete = len(route.stops) >= 3
 
     hit_labels = [
@@ -1123,7 +1142,7 @@ def route_insight(route: Route, intent: ParsedIntent) -> RouteInsight:
         "区域命中" if district_hit else "区域已放宽",
         "距离/步行可控" if route.total_transit_minutes <= constraints.max_walk_minutes * max(1, len(route.stops) - 1) else "距离/步行偏高",
         ">=3 POI" if route_complete else "POI 数不足",
-        "餐饮+文化/娱乐覆盖" if has_meal and has_culture else "类型覆盖不足",
+        "餐饮+文化/娱乐/散步覆盖" if has_meal and has_culture else "类型覆盖不足",
     ]
 
     score = 64
@@ -1185,16 +1204,16 @@ def build_route_completeness(route: Route | None) -> RouteCompleteness | None:
         return None
     categories = {stop.poi.category for stop in route.stops}
     has_meal = bool(categories.intersection({POICategory.RESTAURANT, POICategory.CAFE}))
-    has_culture = bool(categories.intersection({POICategory.ATTRACTION, POICategory.ENTERTAINMENT}))
+    has_culture = bool(categories.intersection({POICategory.ATTRACTION, POICategory.ENTERTAINMENT, POICategory.SHOPPING}))
     notes = []
     if len(route.stops) < 3:
         notes.append("POI 数不足 3 个")
     if not has_meal:
         notes.append("缺少餐饮或咖啡休息点")
     if not has_culture:
-        notes.append("缺少文化/娱乐体验点")
+        notes.append("缺少文化/娱乐/散步体验点")
     if not notes:
-        notes.append("路线满足 3 个以上 POI 串联，并覆盖餐饮 + 文化/娱乐")
+        notes.append("路线满足 3 个以上 POI 串联，并覆盖餐饮 + 文化/娱乐/散步")
     return RouteCompleteness(
         stop_count=len(route.stops),
         has_meal=has_meal,
@@ -1469,6 +1488,8 @@ def suggested_relaxations_for(
 
 def detect_adjustment_kind(instruction: str) -> tuple[str, set[POICategory] | None]:
     text = instruction.strip()
+    if any(word in text for word in ["太多餐厅", "太多吃的", "不要这么多餐厅"]):
+        return "focus", {POICategory.ATTRACTION, POICategory.ENTERTAINMENT, POICategory.SHOPPING, POICategory.CAFE}
     if any(word in text for word in ["换个重点", "重点", "不想都是", "太多咖啡", "太多同类", "更丰富", "换一类"]):
         return "focus", {POICategory.ATTRACTION, POICategory.ENTERTAINMENT, POICategory.SHOPPING, POICategory.RESTAURANT}
     if any(word in text for word in ["少走", "近一点", "距离", "别太远", "打车少"]):
@@ -1915,7 +1936,7 @@ def plan_route(request: PlanRequest) -> PlanResponse:
         intent,
         meituan_context,
         amap_client,
-        allow_anchor_fallback=not live_location_required,
+        allow_anchor_fallback=bool(request.route_context and request.route_context.selected_pois) or not live_location_required,
     )
     if dynamic_candidates:
         candidates = dynamic_candidates

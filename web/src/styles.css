@@ -532,7 +532,7 @@ main {
   display: none;
 }
 
-.xiaotuan-composer {
+.xiaotuan-hero-composer {
   border: 2px solid #8f5cff;
   border-radius: 22px;
   background: #fff;
@@ -541,7 +541,7 @@ main {
   gap: 12px;
 }
 
-.xiaotuan-composer.compact {
+.xiaotuan-chat-composer {
   margin-top: 12px;
   position: sticky;
   bottom: 0;
@@ -554,16 +554,20 @@ main {
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
 }
 
-.xiaotuan-composer textarea {
+.xiaotuan-hero-composer textarea,
+.xiaotuan-chat-composer textarea {
   border: 0;
-  min-height: 92px;
   resize: none;
   outline: none;
+}
+
+.xiaotuan-hero-composer textarea {
+  min-height: 92px;
   font-size: 18px;
   line-height: 1.5;
 }
 
-.xiaotuan-composer.compact textarea {
+.xiaotuan-chat-composer textarea {
   min-height: 34px;
   max-height: 76px;
   padding: 6px 8px;
@@ -571,7 +575,8 @@ main {
   line-height: 1.35;
 }
 
-.xiaotuan-composer button {
+.xiaotuan-hero-composer button,
+.xiaotuan-chat-composer button {
   justify-self: end;
   border: 0;
   height: 38px;
@@ -582,7 +587,8 @@ main {
   font-weight: 950;
 }
 
-.xiaotuan-composer button:disabled {
+.xiaotuan-hero-composer button:disabled,
+.xiaotuan-chat-composer button:disabled {
   opacity: 0.55;
 }
 

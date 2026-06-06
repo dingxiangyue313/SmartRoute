@@ -696,14 +696,33 @@ function XiaotuanScene({ scenario, routeIntent, conversation, onAsk, onOpen, loa
     setDraft("");
   }
 
-  const composer = (
-    <div className={`xiaotuan-composer ${inConversation ? "compact" : "hero"}`}>
+  const heroComposer = (
+    <div className="xiaotuan-hero-composer">
       <textarea
         value={draft}
         onChange={(event) => setDraft(event.target.value)}
-        placeholder={inConversation ? "继续补充地点、时间或活动" : "附近有什么好吃的？"}
+        placeholder="附近有什么好吃的？"
         onKeyDown={(event) => {
           if ((event.metaKey || event.ctrlKey) && event.key === "Enter") submitDraft();
+        }}
+      />
+      <button onClick={submitDraft} disabled={loading || !draft.trim()}>
+        {loading ? "识别中" : "发送"}
+      </button>
+    </div>
+  );
+  const chatComposer = (
+    <div className="xiaotuan-chat-composer">
+      <textarea
+        value={draft}
+        onChange={(event) => setDraft(event.target.value)}
+        placeholder="继续补充地点、时间或活动"
+        onKeyDown={(event) => {
+          if ((event.metaKey || event.ctrlKey) && event.key === "Enter") submitDraft();
+          if (event.key === "Enter" && !event.shiftKey && !event.metaKey && !event.ctrlKey) {
+            event.preventDefault();
+            submitDraft();
+          }
         }}
       />
       <button onClick={submitDraft} disabled={loading || !draft.trim()}>
@@ -718,7 +737,7 @@ function XiaotuanScene({ scenario, routeIntent, conversation, onAsk, onOpen, loa
         <span>搜索</span>
         <strong>问小团</strong>
       </div>
-      {!inConversation && composer}
+      {!inConversation && heroComposer}
       {conversation.length > 0 && (
         <section className="xiaotuan-thread">
           {conversation.slice(-6).map((item) => (
@@ -778,7 +797,7 @@ function XiaotuanScene({ scenario, routeIntent, conversation, onAsk, onOpen, loa
           )}
         </section>
       )}
-      {inConversation && composer}
+      {inConversation && chatComposer}
     </div>
   );
 }
