@@ -903,6 +903,7 @@ def unique_categories(categories: list[POICategory]) -> list[POICategory]:
         POICategory.CAFE,
         POICategory.ATTRACTION,
         POICategory.ENTERTAINMENT,
+        POICategory.SHOPPING,
     ]:
         if category not in ordered:
             ordered.append(category)
@@ -1414,6 +1415,8 @@ def objective_improved(kind: str, deltas: MetricDeltas) -> bool:
         return deltas.total_transit_minutes < 0
     if kind == "add":
         return deltas.stop_count > 0 or deltas.total_time_minutes <= 30
+    if kind == "focus":
+        return True
     return False
 
 
@@ -1432,7 +1435,7 @@ def adjustment_status_for(
         return "not_applied"
     if kind in {"cheaper", "wait", "walk"} and not objective_improved(kind, deltas):
         return "partial"
-    if kind == "add" and candidate is None:
+    if kind in {"add", "focus"} and candidate is None:
         return "partial"
     return "applied"
 
@@ -1453,6 +1456,8 @@ def suggested_relaxations_for(
         suggestions.append("可允许短途打车，或把活动范围收窄到同一商圈。")
     elif kind == "add":
         suggestions.append("可延长 30 分钟，或允许替换掉当前匹配度最低的一站。")
+    elif kind == "focus":
+        suggestions.append("可放宽活动类型，或把范围扩大到附近 3-5 公里以补足文化/娱乐/购物点。")
     if any("预算" in conflict for conflict in conflicts):
         suggestions.append("当前预算约束较紧，建议优先放宽预算或减少正餐数量。")
     if any("排队" in conflict or "等待" in conflict for conflict in conflicts):
@@ -1464,6 +1469,8 @@ def suggested_relaxations_for(
 
 def detect_adjustment_kind(instruction: str) -> tuple[str, set[POICategory] | None]:
     text = instruction.strip()
+    if any(word in text for word in ["换个重点", "重点", "不想都是", "太多咖啡", "太多同类", "更丰富", "换一类"]):
+        return "focus", {POICategory.ATTRACTION, POICategory.ENTERTAINMENT, POICategory.SHOPPING, POICategory.RESTAURANT}
     if any(word in text for word in ["少走", "近一点", "距离", "别太远", "打车少"]):
         return "walk", None
     if any(word in text for word in ["便宜", "省钱", "预算", "贵"]):
@@ -1505,6 +1512,8 @@ def find_adjustment_candidate(
     options = [poi for poi, _ in candidates if poi.id not in current_ids and poi.category in category_filter]
     if not options:
         return None
+    if kind == "focus":
+        return sorted(options, key=lambda poi: (-poi.rating, poi.avg_wait_minutes, poi.price_per_person))[0]
     if kind == "cheaper":
         cheaper = [poi for poi in options if poi.price_per_person < target_stop.poi.price_per_person]
         if not cheaper:
@@ -1525,6 +1534,22 @@ def find_adjustment_candidate(
 
 
 def choose_adjustment_target(route: Route, kind: str) -> int:
+    if kind == "focus":
+        seen_categories: set[POICategory] = set()
+        for index, stop in enumerate(route.stops):
+            if stop.poi.category == POICategory.CAFE and index > 0:
+                return index
+            if stop.poi.category in seen_categories and stop.poi.category in {POICategory.CAFE, POICategory.RESTAURANT}:
+                return index
+            seen_categories.add(stop.poi.category)
+        foodish = [
+            (index, stop.poi.rating)
+            for index, stop in enumerate(route.stops)
+            if stop.poi.category in {POICategory.CAFE, POICategory.RESTAURANT}
+        ]
+        if foodish:
+            return min(foodish, key=lambda item: item[1])[0]
+        return len(route.stops) - 1
     if kind == "cheaper":
         priced = [
             (index, stop.poi.price_per_person)
@@ -1564,6 +1589,8 @@ def adjustment_summary(
     if kind == "wait":
         wait_delta = abs(deltas.total_wait_minutes) if deltas else 0
         return f"已根据“{instruction}”将高等待站点替换为 {target}，总等待减少约 {wait_delta} 分钟。"
+    if kind == "focus":
+        return f"已根据“{instruction}”把重复/弱重点站替换为 {target}，让路线更像真实的一次出行。"
     return f"已根据“{instruction}”加入或替换为 {target}，保持路线仍可执行。"
 
 
@@ -2013,6 +2040,21 @@ def adjust_route(request: AdjustRequest) -> AdjustResponse:
         adjusted_route = agents.route_planner.build_route_from_pois(intent, next_pois, "实时调整")
         if adjusted_route is not None:
             adjusted_route = enrich_route_with_amap_segments(adjusted_route, amap_client, intent.constraints.transport_mode)
+            structure_issues = agents.route_planner._structure_warnings(intent, [stop.poi for stop in adjusted_route.stops])
+            if structure_issues and candidates:
+                repaired_pois = agents.route_planner._repair_selected_stops(
+                    intent,
+                    [stop.poi for stop in adjusted_route.stops],
+                    candidates,
+                    max_stops=max(3, len(adjusted_route.stops)),
+                    budget=intent.constraints.budget_per_person,
+                    pinned_pois=[],
+                )
+                repaired_route = agents.route_planner.build_route_from_pois(intent, repaired_pois, "实时调整")
+                if repaired_route is not None:
+                    repaired_issues = agents.route_planner._structure_warnings(intent, [stop.poi for stop in repaired_route.stops])
+                    if len(repaired_issues) < len(structure_issues):
+                        adjusted_route = enrich_route_with_amap_segments(repaired_route, amap_client, intent.constraints.transport_mode)
     if adjusted_route is None:
         route_build_failed = should_rebuild_route
         adjusted_route = request.route.model_copy(deep=True)
@@ -2032,6 +2074,11 @@ def adjust_route(request: AdjustRequest) -> AdjustResponse:
     status = adjustment_status_for(kind, request.route, adjusted_route, changed_stops, deltas, candidate)
     if route_build_failed:
         status = "not_applied"
+    structure_issues = agents.route_planner._structure_warnings(intent, [stop.poi for stop in adjusted_route.stops])
+    if structure_issues:
+        adjusted_route.warnings = list(dict.fromkeys([*adjusted_route.warnings, *structure_issues]))[:5]
+        if status == "applied":
+            status = "partial"
 
     changed_name = candidate.name if candidate else None
     summary = adjustment_summary(kind, request.instruction, changed_name, status, deltas)

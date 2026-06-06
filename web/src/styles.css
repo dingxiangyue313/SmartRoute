@@ -522,6 +522,16 @@ main {
   background: linear-gradient(180deg, #fbf7ff, #fff 160px);
 }
 
+.xiaotuan-page.chatting {
+  display: flex;
+  min-height: 100%;
+  flex-direction: column;
+}
+
+.xiaotuan-page.chatting .xiaotuan-suggestions {
+  display: none;
+}
+
 .xiaotuan-composer {
   border: 2px solid #8f5cff;
   border-radius: 22px;
@@ -531,6 +541,19 @@ main {
   gap: 12px;
 }
 
+.xiaotuan-composer.compact {
+  margin-top: 12px;
+  position: sticky;
+  bottom: 0;
+  z-index: 3;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 8px;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
+}
+
 .xiaotuan-composer textarea {
   border: 0;
   min-height: 92px;
@@ -538,6 +561,14 @@ main {
   outline: none;
   font-size: 18px;
   line-height: 1.5;
+}
+
+.xiaotuan-composer.compact textarea {
+  min-height: 34px;
+  max-height: 76px;
+  padding: 6px 8px;
+  font-size: 13px;
+  line-height: 1.35;
 }
 
 .xiaotuan-composer button {
@@ -551,10 +582,19 @@ main {
   font-weight: 950;
 }
 
+.xiaotuan-composer button:disabled {
+  opacity: 0.55;
+}
+
 .xiaotuan-thread {
   margin-top: 14px;
   display: grid;
   gap: 10px;
+}
+
+.xiaotuan-page.chatting .xiaotuan-thread {
+  flex: 1;
+  align-content: start;
 }
 
 .xiaotuan-bubble {
@@ -2108,11 +2148,39 @@ main {
 
 .adjust-composer {
   display: grid;
-  grid-template-columns: 1fr auto;
   gap: 8px;
   position: sticky;
   bottom: 0;
   z-index: 5;
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.96);
+  padding: 8px;
+  box-shadow: 0 -8px 28px rgba(0, 0, 0, 0.08);
+}
+
+.adjust-quick-row {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.adjust-composer .adjust-quick-row button {
+  flex: 0 0 auto;
+  height: 30px;
+  border: 1px solid #ececec;
+  border-radius: 999px;
+  background: #fff;
+  color: var(--ink);
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.adjust-input-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
 }
 
 .adjust-composer input {
@@ -2133,6 +2201,10 @@ main {
   color: #fff;
   padding: 0 13px;
   font-weight: 900;
+}
+
+.adjust-composer button:disabled {
+  opacity: 0.55;
 }
 
 .adjust-history {

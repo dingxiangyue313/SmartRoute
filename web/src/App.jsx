@@ -681,35 +681,44 @@ function SearchScene({ scenario, onOpen, loading }) {
 }
 
 function XiaotuanScene({ scenario, routeIntent, conversation, onAsk, onOpen, loading }) {
-  const [draft, setDraft] = useState(scenario.query);
+  const [draft, setDraft] = useState("");
   const hasMissingSlots = (routeIntent?.missing_slots?.length || routeIntent?.detected_slots?.missing_slots?.length || 0) > 0;
+  const inConversation = conversation.length > 0 || Boolean(routeIntent) || loading;
 
   useEffect(() => {
-    setDraft(scenario.query);
+    setDraft("");
   }, [scenario.query]);
 
+  function submitDraft() {
+    const trimmed = draft.trim();
+    if (!trimmed) return;
+    onAsk(trimmed);
+    setDraft("");
+  }
+
+  const composer = (
+    <div className={`xiaotuan-composer ${inConversation ? "compact" : "hero"}`}>
+      <textarea
+        value={draft}
+        onChange={(event) => setDraft(event.target.value)}
+        placeholder={inConversation ? "继续补充地点、时间或活动" : "附近有什么好吃的？"}
+        onKeyDown={(event) => {
+          if ((event.metaKey || event.ctrlKey) && event.key === "Enter") submitDraft();
+        }}
+      />
+      <button onClick={submitDraft} disabled={loading || !draft.trim()}>
+        {loading ? "识别中" : "发送"}
+      </button>
+    </div>
+  );
+
   return (
-    <div className="meituan-page xiaotuan-page">
+    <div className={`meituan-page xiaotuan-page ${inConversation ? "chatting" : "idle"}`}>
       <div className="mt-header">
         <span>搜索</span>
         <strong>问小团</strong>
       </div>
-      <div className="xiaotuan-composer">
-        <textarea
-          value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-          placeholder="附近有什么好吃的？"
-        />
-        <button
-          onClick={() => {
-            onAsk(draft);
-            setDraft("");
-          }}
-          disabled={loading}
-        >
-          {loading ? "识别中" : "发送"}
-        </button>
-      </div>
+      {!inConversation && composer}
       {conversation.length > 0 && (
         <section className="xiaotuan-thread">
           {conversation.slice(-6).map((item) => (
@@ -720,14 +729,16 @@ function XiaotuanScene({ scenario, routeIntent, conversation, onAsk, onOpen, loa
           ))}
         </section>
       )}
-      <section className="mt-section">
-        <h3>试试这样问</h3>
-        <div className="xiaotuan-prompts">
-          {["附近有什么好吃的", "深圳大学附近下午3小时怎么玩", "外滩下午3小时怎么玩"].map((item) => (
-            <button key={item} onClick={() => setDraft(item)}>✦ {item}</button>
-          ))}
-        </div>
-      </section>
+      {!inConversation && (
+        <section className="mt-section xiaotuan-suggestions">
+          <h3>试试这样问</h3>
+          <div className="xiaotuan-prompts">
+            {["附近有什么好吃的", "深圳大学附近下午3小时怎么玩", "外滩下午3小时怎么玩"].map((item) => (
+              <button key={item} onClick={() => setDraft(item)}>✦ {item}</button>
+            ))}
+          </div>
+        </section>
+      )}
       {routeIntent && (
         <section className={`intent-card ${routeIntent.action}`}>
           <span>{routeIntent.source === "llm" ? "DeepSeek 意图识别" : "规则兜底识别"} · {(routeIntent.confidence * 100).toFixed(0)}%</span>
@@ -767,6 +778,7 @@ function XiaotuanScene({ scenario, routeIntent, conversation, onAsk, onOpen, loa
           )}
         </section>
       )}
+      {inConversation && composer}
     </div>
   );
 }
@@ -1106,23 +1118,31 @@ function RouteLoadingState({ label }) {
 
 function AdjustComposer({ onSubmit, loading }) {
   const [draft, setDraft] = useState("");
-  function submit() {
-    const trimmed = draft.trim();
+  const quickAdjustments = ["少走路", "不要排队", "便宜点", "加晚餐", "加展览", "换个重点"];
+  function submit(value = draft) {
+    const trimmed = value.trim();
     if (!trimmed) return;
     onSubmit(trimmed);
     setDraft("");
   }
   return (
     <section className="adjust-composer">
-      <input
-        value={draft}
-        onChange={(event) => setDraft(event.target.value)}
-        placeholder="继续说：少走路一点 / 换便宜点 / 不要排队"
-        onKeyDown={(event) => {
-          if (event.key === "Enter") submit();
-        }}
-      />
-      <button onClick={submit} disabled={loading}>{loading ? "调整中" : "调整"}</button>
+      <div className="adjust-quick-row">
+        {quickAdjustments.map((item) => (
+          <button type="button" key={item} onClick={() => submit(item)} disabled={loading}>{item}</button>
+        ))}
+      </div>
+      <div className="adjust-input-row">
+        <input
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          placeholder="继续说：少走路一点 / 换便宜点 / 不要排队"
+          onKeyDown={(event) => {
+            if (event.key === "Enter") submit();
+          }}
+        />
+        <button type="button" onClick={() => submit()} disabled={loading || !draft.trim()}>{loading ? "调整中" : "调整"}</button>
+      </div>
     </section>
   );
 }

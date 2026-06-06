@@ -3,13 +3,23 @@ from __future__ import annotations
 import uuid
 from collections import defaultdict
 from datetime import datetime, timedelta
+from itertools import permutations
 
 from core.models import POI, POICategory, ParsedIntent, Route, RouteStop, UserProfile
 from core.rag.vector_store import haversine_km, transit_minutes
 
 
 MEAL_CATEGORIES = {POICategory.RESTAURANT, POICategory.CAFE}
+FOODISH_CATEGORIES = {POICategory.RESTAURANT, POICategory.CAFE}
 CULTURE_CATEGORIES = {POICategory.ATTRACTION, POICategory.ENTERTAINMENT}
+EXPERIENCE_CATEGORIES = {POICategory.ATTRACTION, POICategory.ENTERTAINMENT, POICategory.SHOPPING}
+CORE_ROUTE_CATEGORIES = {
+    POICategory.RESTAURANT,
+    POICategory.CAFE,
+    POICategory.ATTRACTION,
+    POICategory.ENTERTAINMENT,
+    POICategory.SHOPPING,
+}
 
 
 class RoutePlannerAgent:
@@ -38,7 +48,7 @@ class RoutePlannerAgent:
         used_signatures: set[tuple[str, ...]] = set()
 
         for theme, sorter in variants:
-            ordered = sorter(candidates)
+            ordered = self._diversity_rerank(sorter(candidates), intent)
             route = self._build_route(intent, ordered, theme, pinned_pois)
             if not route:
                 continue
@@ -74,19 +84,36 @@ class RoutePlannerAgent:
     ) -> Route | None:
         constraints = intent.constraints
         selected = self._select_stops(
+            intent,
             ordered_candidates,
             constraints.total_time_hours,
             constraints.budget_per_person,
             pinned_pois=pinned_pois,
         )
+        selected = self._repair_selected_stops(
+            intent,
+            selected,
+            ordered_candidates,
+            max_stops=max(5 if constraints.total_time_hours >= 6 else 4 if constraints.total_time_hours >= 4 else 3, len(pinned_pois or [])),
+            budget=constraints.budget_per_person,
+            pinned_pois=pinned_pois,
+        )
         if len(selected) < 3:
-            selected = self._nearest_neighbor_order([poi for poi, _ in ordered_candidates[:3]])
+            selected = self._repair_selected_stops(
+                intent,
+                [poi for poi, _ in ordered_candidates[:3]],
+                ordered_candidates,
+                max_stops=3,
+                budget=constraints.budget_per_person,
+                pinned_pois=pinned_pois,
+            )
         if not selected:
             return None
         return self.build_route_from_pois(intent, selected, theme)
 
     def build_route_from_pois(self, intent: ParsedIntent, selected: list[POI], theme: str) -> Route | None:
         constraints = intent.constraints
+        selected = self._best_itinerary_order(intent, selected)
         start_dt = datetime.strptime(constraints.start_time, "%H:%M")
         end_limit = start_dt + timedelta(hours=constraints.total_time_hours)
 
@@ -170,6 +197,7 @@ class RoutePlannerAgent:
             warnings.append("路线接近时间上限，已优先保证 3 个 POI 串联；建议选择打车或缩短单站停留。")
         if not self._has_meal_and_culture([stop.poi for stop in stops]):
             warnings.append("当前候选 POI 类型覆盖不足，建议放宽区域或等待条件。")
+        warnings.extend(self._structure_warnings(intent, [stop.poi for stop in stops]))
 
         return Route(
             id=str(uuid.uuid4())[:8],
@@ -186,6 +214,7 @@ class RoutePlannerAgent:
 
     def _select_stops(
         self,
+        intent: ParsedIntent,
         candidates: list[tuple[POI, float]],
         total_hours: float,
         budget: float | None,
@@ -203,14 +232,25 @@ class RoutePlannerAgent:
             running_cost += poi.price_per_person
 
         if len(selected) < max_stops:
-            running_cost = self._append_best_from_group(selected, candidates, MEAL_CATEGORIES, running_cost, budget)
+            running_cost = self._append_best_from_group(selected, candidates, MEAL_CATEGORIES, running_cost, budget, intent)
         if len(selected) < max_stops:
-            running_cost = self._append_best_from_group(selected, candidates, CULTURE_CATEGORIES, running_cost, budget)
+            running_cost = self._append_best_from_group(selected, candidates, CULTURE_CATEGORIES, running_cost, budget, intent)
+        if len(selected) < max_stops and not any(poi.category == POICategory.SHOPPING for poi in selected):
+            running_cost = self._append_best_from_group(
+                selected,
+                candidates,
+                {POICategory.SHOPPING},
+                running_cost,
+                budget,
+                intent,
+            )
 
         for poi, _ in candidates:
             if len(selected) >= max_stops:
                 break
             if poi.id in {p.id for p in selected}:
+                continue
+            if not self._can_add_poi(selected, poi, intent, pinned=False):
                 continue
             if budget and running_cost + poi.price_per_person > budget * 1.2 and len(selected) >= 3:
                 continue
@@ -225,7 +265,7 @@ class RoutePlannerAgent:
                 if len(selected) >= 3:
                     break
 
-        return self._nearest_neighbor_order(selected)
+        return self._best_itinerary_order(intent, selected)
 
     def _ensure_required_candidates(
         self,
@@ -295,9 +335,16 @@ class RoutePlannerAgent:
         categories: set[POICategory],
         running_cost: float,
         budget: float | None,
+        intent: ParsedIntent | None,
     ) -> float:
         selected_ids = {poi.id for poi in selected}
-        group_items = [(poi, score) for poi, score in candidates if poi.category in categories and poi.id not in selected_ids]
+        group_items = [
+            (poi, score)
+            for poi, score in candidates
+            if poi.category in categories
+            and poi.id not in selected_ids
+            and (intent is None or self._can_add_poi(selected, poi, intent, pinned=False))
+        ]
         if not group_items:
             return running_cost
         affordable_items = [
@@ -308,6 +355,147 @@ class RoutePlannerAgent:
         poi = (affordable_items or group_items)[0][0]
         selected.append(poi)
         return running_cost + poi.price_per_person
+
+    def _allows_multiple_cafes(self, intent: ParsedIntent) -> bool:
+        raw_query = str(intent.extracted_preferences.get("raw_query", ""))
+        preferences = " ".join(str(value) for value in intent.extracted_preferences.values())
+        text = f"{raw_query} {preferences}"
+        return any(word in text for word in ["咖啡打卡", "多家咖啡", "咖啡店巡游", "咖啡馆巡游", "咖啡路线"])
+
+    def _can_add_poi(self, selected: list[POI], poi: POI, intent: ParsedIntent, pinned: bool) -> bool:
+        if pinned:
+            return True
+        if poi.category not in CORE_ROUTE_CATEGORIES:
+            return False
+        category_count = sum(1 for item in selected if item.category == poi.category)
+        if poi.category == POICategory.CAFE and category_count >= 1 and not self._allows_multiple_cafes(intent):
+            return False
+        if category_count >= 2:
+            return False
+        if selected and selected[-1].category == poi.category:
+            return False
+        return True
+
+    def _repair_selected_stops(
+        self,
+        intent: ParsedIntent,
+        selected: list[POI],
+        candidates: list[tuple[POI, float]],
+        max_stops: int,
+        budget: float | None,
+        pinned_pois: list[POI] | None,
+    ) -> list[POI]:
+        pinned_ids = {poi.id for poi in (pinned_pois or [])}
+        repaired: list[POI] = []
+        running_cost = 0.0
+        for poi in selected:
+            if poi.id in {item.id for item in repaired}:
+                continue
+            if poi.id not in pinned_ids and not self._can_add_poi(repaired, poi, intent, pinned=False):
+                continue
+            repaired.append(poi)
+            running_cost += poi.price_per_person
+            if len(repaired) >= max_stops:
+                break
+
+        if not any(poi.category in MEAL_CATEGORIES for poi in repaired):
+            running_cost = self._append_best_from_group(repaired, candidates, MEAL_CATEGORIES, running_cost, budget, intent)
+        if not any(poi.category in CULTURE_CATEGORIES for poi in repaired):
+            running_cost = self._append_best_from_group(repaired, candidates, CULTURE_CATEGORIES, running_cost, budget, intent)
+        if len(repaired) < 3 and not any(poi.category == POICategory.SHOPPING for poi in repaired):
+            running_cost = self._append_best_from_group(repaired, candidates, {POICategory.SHOPPING}, running_cost, budget, intent)
+
+        for poi, _ in candidates:
+            if len(repaired) >= max_stops:
+                break
+            if poi.id in {item.id for item in repaired}:
+                continue
+            if not self._can_add_poi(repaired, poi, intent, pinned=False):
+                continue
+            if budget and running_cost + poi.price_per_person > budget * 1.25 and len(repaired) >= 3:
+                continue
+            repaired.append(poi)
+            running_cost += poi.price_per_person
+
+        return self._best_itinerary_order(intent, repaired)
+
+    def _diversity_rerank(self, candidates: list[tuple[POI, float]], intent: ParsedIntent) -> list[tuple[POI, float]]:
+        remaining = list(candidates)
+        reranked: list[tuple[POI, float]] = []
+        while remaining:
+            def rank(item: tuple[POI, float]) -> float:
+                poi, score = item
+                same_category_count = sum(1 for selected, _ in reranked if selected.category == poi.category)
+                cafe_penalty = 1.6 if poi.category == POICategory.CAFE and same_category_count and not self._allows_multiple_cafes(intent) else 0.0
+                repeat_penalty = same_category_count * 0.38
+                adjacency_penalty = 0.35 if reranked and reranked[-1][0].category == poi.category else 0.0
+                coverage_bonus = 0.22 if poi.category in EXPERIENCE_CATEGORIES and not any(selected.category in EXPERIENCE_CATEGORIES for selected, _ in reranked) else 0.0
+                return score + coverage_bonus - repeat_penalty - cafe_penalty - adjacency_penalty
+
+            chosen = max(remaining, key=rank)
+            remaining.remove(chosen)
+            reranked.append(chosen)
+        return reranked
+
+    def _best_itinerary_order(self, intent: ParsedIntent, pois: list[POI]) -> list[POI]:
+        if len(pois) <= 2:
+            return pois
+        unique_pois = []
+        seen = set()
+        for poi in pois:
+            if poi.id in seen:
+                continue
+            seen.add(poi.id)
+            unique_pois.append(poi)
+        if len(unique_pois) > 6:
+            unique_pois = unique_pois[:6]
+
+        raw_query = str(intent.extracted_preferences.get("raw_query", ""))
+        is_evening = any(word in raw_query for word in ["晚上", "今晚", "晚餐", "夜"])
+
+        def order_score(order: tuple[POI, ...]) -> float:
+            score = 0.0
+            categories = [poi.category for poi in order]
+            for index, category in enumerate(categories):
+                if is_evening:
+                    if index == 0 and category == POICategory.RESTAURANT:
+                        score += 18
+                    if index >= 1 and category in EXPERIENCE_CATEGORIES:
+                        score += 10
+                else:
+                    if index == 0 and category in {POICategory.CAFE, POICategory.ATTRACTION, POICategory.SHOPPING}:
+                        score += 12
+                    if index == 1 and category in EXPERIENCE_CATEGORIES:
+                        score += 10
+                    if index >= 2 and category in {POICategory.RESTAURANT, POICategory.ENTERTAINMENT, POICategory.SHOPPING}:
+                        score += 8
+                if index > 0:
+                    prev = categories[index - 1]
+                    if category == prev:
+                        score -= 80
+                    if category in FOODISH_CATEGORIES and prev in FOODISH_CATEGORIES:
+                        score -= 24
+                    if category != prev:
+                        score += 6
+            cafe_count = categories.count(POICategory.CAFE)
+            if cafe_count > 1 and not self._allows_multiple_cafes(intent):
+                score -= 120 * (cafe_count - 1)
+            distance = sum(
+                haversine_km(order[index - 1].latitude, order[index - 1].longitude, order[index].latitude, order[index].longitude)
+                for index in range(1, len(order))
+            )
+            score -= distance * 0.7
+            return score
+
+        return list(max(permutations(unique_pois), key=order_score))
+
+    def _structure_warnings(self, intent: ParsedIntent, pois: list[POI]) -> list[str]:
+        warnings: list[str] = []
+        if not self._allows_multiple_cafes(intent) and sum(1 for poi in pois if poi.category == POICategory.CAFE) > 1:
+            warnings.append("当前候选咖啡/茶饮过多，已尽量压缩为休息点；如需咖啡打卡可明确说明。")
+        if any(pois[index].category == pois[index - 1].category for index in range(1, len(pois))):
+            warnings.append("路线中仍存在相邻同类站点，建议放宽区域或增加文化/娱乐类偏好。")
+        return warnings
 
     def _has_meal_and_culture(self, pois: list[POI]) -> bool:
         categories = {poi.category for poi in pois}

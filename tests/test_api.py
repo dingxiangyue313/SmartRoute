@@ -56,6 +56,37 @@ def test_unknown_poi_prompt_returns_complete_route():
     assert payload["tool_trace"]
 
 
+def test_adjust_endpoint_returns_structured_results(monkeypatch):
+    monkeypatch.setattr(api, "classify_adjustment_with_deepseek", lambda *_args, **_kwargs: None)
+    client = TestClient(app)
+    plan_response = client.post(
+        "/api/plan",
+        json={
+            "query": "帮我规划一个上海外滩附近的文艺下午，时间3小时，两个人，预算200，不想排队",
+            "user_id": "adjust-structured-test-user",
+        },
+    )
+    assert plan_response.status_code == 200
+    route = plan_response.json()["routes"][0]["route"]
+
+    for instruction in ["少走路", "不要排队", "便宜点", "换个重点"]:
+        response = client.post(
+            "/api/adjust",
+            json={
+                "query": "帮我规划一个上海外滩附近的文艺下午，时间3小时，两个人，预算200，不想排队",
+                "instruction": instruction,
+                "route": route,
+                "user_id": "adjust-structured-test-user",
+            },
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["adjustment_status"] in {"applied", "partial", "not_applied"}
+        assert payload["metric_deltas"]
+        assert payload["tool_trace"]
+        assert payload["adjustment_history_item"]
+
+
 def test_explicit_anchor_does_not_fallback_to_shanghai_local_rag(monkeypatch):
     class FakeAMapClient:
         enabled = True
