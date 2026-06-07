@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -73,10 +74,37 @@ class RouteIntentRequest(BaseModel):
     user_reply_type: Literal["free_text", "chip", "confirm_route", "skip"] = "free_text"
 
 
+class SearchPreviewRequest(BaseModel):
+    query: str = Field(min_length=1)
+    history_terms: list[str] = Field(default_factory=list)
+    city_hint: str | None = None
+    user_id: str = "demo-user"
+    profile_mode: str = "文艺体验型"
+    profile_source: Literal["preset", "manual_import", "official_api"] = "preset"
+    profile_id: str | None = None
+
+
 class CandidateView(BaseModel):
     poi: POI
     score: float
     reason: str
+
+
+class SearchAnchorView(BaseModel):
+    text: str
+    city: str
+    latitude: float
+    longitude: float
+    source: str
+
+
+class SearchPreviewResponse(BaseModel):
+    anchor: SearchAnchorView | None = None
+    candidates: list[CandidateView]
+    route_context: RouteContext
+    trigger_title: str
+    trigger_text: str
+    warnings: list[str] = Field(default_factory=list)
 
 
 class RouteInsight(BaseModel):
@@ -685,6 +713,11 @@ def intent_with_context(
     constraints.budget_per_person = constraints.budget_per_person or context.common_budget
     if route_context and route_context.transport_strategy:
         constraints.transport_mode = route_context.transport_strategy
+    if route_context:
+        if route_context.fixed_start_poi_id:
+            next_intent.extracted_preferences["fixed_start_poi_id"] = route_context.fixed_start_poi_id
+        if route_context.pinned_policy:
+            next_intent.extracted_preferences["pinned_policy"] = route_context.pinned_policy
     if context.walk_preference == "少走路":
         constraints.max_walk_minutes = min(constraints.max_walk_minutes, 10)
         if not (route_context and route_context.transport_strategy):
@@ -740,6 +773,8 @@ def extract_anchor_text(query: str, route_context: RouteContext | None = None) -
         "gaga",
         "科技园",
         "深圳湾",
+        "广州永庆坊",
+        "永庆坊",
         "外滩",
         "南京东路",
         "陆家嘴",
@@ -802,6 +837,7 @@ def is_likely_place_anchor(value: str) -> bool:
         "步行街",
         "购物中心",
         "城",
+        "坊",
         "店",
     ]
     return any(text.endswith(suffix) for suffix in suffixes)
@@ -816,7 +852,7 @@ def city_hint_from(query: str, intent: ParsedIntent, route_context: RouteContext
         return "上海"
     if any(word in query for word in ["北京", "三里屯", "朝阳", "国贸"]):
         return "北京"
-    if any(word in query for word in ["广州", "天河", "珠江新城"]):
+    if any(word in query for word in ["广州", "天河", "珠江新城", "永庆坊", "荔湾", "西关"]):
         return "广州"
     if intent.city and intent.parser_source == "llm":
         return intent.city
@@ -1161,6 +1197,48 @@ def build_candidate_view(poi: POI, score: float) -> CandidateView:
     if poi.tags:
         reason_parts.append(" / ".join(poi.tags[:2]))
     return CandidateView(poi=poi, score=round(score, 3), reason=" · ".join(reason_parts))
+
+
+def poi_to_context_poi(poi: POI) -> RouteContextPOI:
+    return RouteContextPOI(
+        id=poi.id,
+        name=poi.name,
+        category=poi.category,
+        address=poi.address,
+        district=poi.district,
+        latitude=poi.latitude,
+        longitude=poi.longitude,
+        rating=poi.rating,
+        review_count=poi.review_count,
+        price_per_person=poi.price_per_person,
+        avg_wait_minutes=poi.avg_wait_minutes,
+        business_hours=poi.business_hours,
+        tags=poi.tags,
+        ugc_summary=poi.ugc_summary,
+        visit_duration_minutes=poi.visit_duration_minutes,
+        source=poi.source,
+        external_id=poi.external_id,
+    )
+
+
+def default_search_selected_pois(candidates: list[tuple[POI, float]], max_count: int = 4) -> list[RouteContextPOI]:
+    selected: list[POI] = []
+    seen_categories: set[POICategory] = set()
+    for poi, _ in candidates:
+        if poi.id in {item.id for item in selected}:
+            continue
+        if poi.category not in seen_categories:
+            selected.append(poi)
+            seen_categories.add(poi.category)
+        if len(selected) >= max_count:
+            break
+    for poi, _ in candidates:
+        if len(selected) >= max(2, min(max_count, len(candidates))):
+            break
+        if poi.id in {item.id for item in selected}:
+            continue
+        selected.append(poi)
+    return [poi_to_context_poi(poi) for poi in selected[:max_count]]
 
 
 def route_insight(route: Route, intent: ParsedIntent) -> RouteInsight:
@@ -1772,9 +1850,17 @@ def find_adjustment_candidate(
             return None
         return sorted(closer, key=lambda poi: (distance_around(route, target_index, poi), poi.avg_wait_minutes, -poi.rating))[0]
     if kind in {"avoid_stop", "avoid_category", "reduce_category"}:
+        def replacement_role_rank(poi: POI) -> int:
+            if POICategory.CAFE in avoid_categories and poi.category == POICategory.RESTAURANT:
+                return 0
+            if poi.category in {POICategory.ATTRACTION, POICategory.SHOPPING, POICategory.ENTERTAINMENT}:
+                return 1
+            return 2
+
         return sorted(
             options,
             key=lambda poi: (
+                replacement_role_rank(poi),
                 distance_around(route, target_index, poi),
                 poi.avg_wait_minutes,
                 -poi.rating,
@@ -2178,6 +2264,79 @@ def route_intent(request: RouteIntentRequest) -> RouteIntentResult:
     )
 
 
+@app.post("/api/search-preview", response_model=SearchPreviewResponse)
+def search_preview(request: SearchPreviewRequest) -> SearchPreviewResponse:
+    agents = load_agents()
+    amap_client = AMapClient()
+    meituan_context, profile_source, resolved_profile_id, _, _ = resolve_profile_context(
+        request.profile_source,
+        request.profile_mode,
+        request.profile_id,
+    )
+    profile = agents.profile_manager.get_profile(request.user_id)
+    combined_query = " ".join([request.query, *request.history_terms]).strip()
+    intent = agents.intent_parser.parse(combined_query, user_profile=profile.model_dump())
+    initial_context = RouteContext(
+        source="search",
+        city_hint=request.city_hint or city_hint_from(combined_query, intent),
+        anchor_text=extract_anchor_text(request.query) or extract_anchor_text(combined_query),
+        pinned_policy="soft",
+    )
+    intent = intent_with_context(intent, meituan_context, initial_context)
+    pseudo_request = PlanRequest(
+        query=combined_query,
+        user_id=request.user_id,
+        n_routes=1,
+        profile_mode=request.profile_mode,
+        profile_source=profile_source,
+        profile_id=resolved_profile_id,
+        route_context=initial_context,
+    )
+    candidates, _, anchor, context_trace = build_dynamic_candidates(
+        pseudo_request,
+        intent,
+        meituan_context,
+        amap_client,
+        allow_anchor_fallback=True,
+    )
+    candidates = apply_context_to_candidates(candidates, meituan_context)
+    selected_pois = default_search_selected_pois(candidates)
+    city_hint = normalize_city_hint(anchor.city) if anchor else normalize_city_hint(initial_context.city_hint)
+    route_context = initial_context.model_copy(
+        update={
+            "city_hint": city_hint or initial_context.city_hint,
+            "anchor_text": anchor.text if anchor else initial_context.anchor_text,
+            "anchor_location": anchor.location if anchor else initial_context.anchor_location,
+            "selected_pois": selected_pois,
+            "pinned_policy": "soft",
+        }
+    )
+    anchor_view = None
+    if anchor:
+        anchor_view = SearchAnchorView(
+            text=anchor.text,
+            city=city_hint or anchor.city,
+            latitude=anchor.location.latitude,
+            longitude=anchor.location.longitude,
+            source=anchor.source,
+        )
+    warnings = [note for note in context_trace if "失败" in note or "不足" in note or "兜底" in note]
+    if not candidates:
+        warnings.append("搜索页没有召回可串联 POI，可换一个商圈、放宽区域或稍后重试高德服务。")
+    trigger_count = len(selected_pois) or min(len(candidates), 4)
+    return SearchPreviewResponse(
+        anchor=anchor_view,
+        candidates=[build_candidate_view(poi, score) for poi, score in candidates[:8]],
+        route_context=route_context,
+        trigger_title=f"SmartRoute 已发现 {trigger_count} 个可串联地点",
+        trigger_text=(
+            f"根据“{request.query}”和历史搜索偏好，先召回附近真实 POI，"
+            "再把你勾选的地点作为路线候选生成可执行安排。"
+        ),
+        warnings=list(dict.fromkeys(warnings))[:4],
+    )
+
+
 @app.get("/api/profile-sources", response_model=ProfileSourcesResponse)
 def profile_sources() -> ProfileSourcesResponse:
     preset_profiles = [
@@ -2254,7 +2413,7 @@ def plan_route(request: PlanRequest) -> PlanResponse:
         intent,
         meituan_context,
         amap_client,
-        allow_anchor_fallback=bool(request.route_context and request.route_context.selected_pois) or not live_location_required,
+        allow_anchor_fallback=True,
     )
     if dynamic_candidates:
         candidates = dynamic_candidates
@@ -2338,7 +2497,7 @@ def adjust_route(request: AdjustRequest) -> AdjustResponse:
         intent,
         meituan_context,
         amap_client,
-        allow_anchor_fallback=not requires_live_location_data(request.query, intent, request.route_context),
+        allow_anchor_fallback=True,
     )
     if dynamic_candidates:
         candidates = dynamic_candidates
@@ -2359,6 +2518,28 @@ def adjust_route(request: AdjustRequest) -> AdjustResponse:
         for category in categories:
             if category not in intent.constraints.avoid_categories:
                 intent.constraints.avoid_categories.append(category)
+    if kind in {"avoid_category", "reduce_category"} and categories and anchor:
+        replacement_categories = [
+            category
+            for category in [POICategory.RESTAURANT, POICategory.ATTRACTION, POICategory.SHOPPING, POICategory.ENTERTAINMENT]
+            if category not in categories
+        ]
+        existing_categories = {poi.category for poi, _ in candidates if poi.category not in categories}
+        needs_role_supplement = (
+            POICategory.CAFE in categories
+            and POICategory.RESTAURANT not in existing_categories
+        ) or not existing_categories.intersection({POICategory.ATTRACTION, POICategory.SHOPPING, POICategory.ENTERTAINMENT})
+        if needs_role_supplement:
+            existing_candidate_ids = {poi.id for poi, _ in candidates}
+            supplemental_pois = fallback_pois_around_anchor(anchor, replacement_categories, count_per_category=1)
+            added_count = 0
+            for poi in supplemental_pois:
+                if poi.id in existing_candidate_ids:
+                    continue
+                candidates.append((poi, 2.45))
+                added_count += 1
+            if added_count:
+                context_trace.append(f"调整兜底候选：为避开 {'、'.join(category.value for category in categories)} 补充 {added_count} 个锚点附近替代角色。")
     if adjustment_intent.target_index is not None:
         target_index = adjustment_intent.target_index
     elif kind == "add":
@@ -2611,7 +2792,7 @@ def replace_poi(request: ReplaceRequest) -> ReplaceResponse:
         intent,
         meituan_context,
         amap_client,
-        allow_anchor_fallback=not requires_live_location_data(request.query, intent, replace_context),
+        allow_anchor_fallback=True,
     )
     if dynamic_candidates:
         candidates = dynamic_candidates

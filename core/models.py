@@ -116,6 +116,8 @@ class RouteContext(BaseModel):
     anchor_location: GeoPoint | None = None
     selected_pois: list[RouteContextPOI] = Field(default_factory=list)
     transport_strategy: str | None = None
+    fixed_start_poi_id: str | None = None
+    pinned_policy: str | None = None
 
 
 class UserProfile(BaseModel):

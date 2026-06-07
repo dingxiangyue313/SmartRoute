@@ -30,6 +30,8 @@ streamlit run app.py
 
 - Web Demo 以“搜索页 / 问小团 / 收藏夹 / POI 详情页”四个美团入口调起 SmartRoute 插件
 - 四个入口会把真实上下文传给后端：小团/搜索传地点锚点，收藏夹传已选 POI，详情页传当前商户坐标
+- 搜索页已接入 `/api/search-preview`：先按搜索词、历史搜索和城市锚点召回 4-8 个真实候选 POI，用户勾选后再生成路线
+- POI 详情页支持固定起点：从当前店出发时会传 `fixed_start_poi_id`，路线排序和后续调整都必须保留该店为第 1 站
 - 小团入口支持路线意图识别：优先 DeepSeek，失败或无 Key 时规则兜底
 - 自然语言解析时间、预算、人数、排队、区域和偏好；`IntentParserAgent` 已支持 DeepSeek LLM 优先 + 规则兜底
 - 本地 POI 检索与多条件过滤
@@ -44,6 +46,7 @@ streamlit run app.py
 - 展示规划耗时、路线完整性、冲突解释和结构化生成后追问
 - 展示调整状态、调整前后指标变化、站点变化和失败时的约束放宽建议
 - 高德地图展示站点与路线；后端支持高德 Web 服务 POI 文本搜索、地理编码、周边 POI 和步行/公交/打车策略化路径规划
+- 高德 Web 服务调用已增加 30 分钟内存 TTL 缓存，减少交付演示时重复搜索导致 QPS/配额触发的风险
 - 明确地点场景采用真实地点模式：优先返回 `source=amap` 的真实 POI；高德失败时返回失败 trace，不跨城回退到本地 RAG
 - 同类 POI 替换，展示预算/等待/距离影响
 - SQLite 记录用户反馈和偏好
@@ -53,6 +56,7 @@ streamlit run app.py
 - 当前支持模拟画像和脱敏手动导入画像；不接真实美团账号授权、真实搜索历史或收藏接口
 - 明确地点/城市/入口上下文场景依赖高德 Web 服务 Key；Key 缺失、类型错误或权限不匹配时，系统会提示失败原因，不再生成错误城市路线
 - `official_api` 仍是预留 adapter；没有美团或大赛方授权时，不读取真实客户数据
+- Stitch 仅作为移动端视觉设计参考或高保真稿生成工具，不作为最终部署平台；线上 Demo 仍由当前 Vite + FastAPI 承接真实后端 API
 
 ### DeepSeek API Key
 
@@ -88,7 +92,7 @@ npm install
 npm run dev
 ```
 
-打开 `http://127.0.0.1:5173`。页面会请求 `/api/plan`、`/api/adjust`、`/api/replace`、`/api/feedback`，路线、候选 POI、局部调整、替换项和用户画像都来自当前后端链路。
+打开 `http://127.0.0.1:5173`。页面会请求 `/api/search-preview`、`/api/plan`、`/api/adjust`、`/api/replace`、`/api/feedback`，搜索候选、路线、局部调整、替换项和用户画像都来自当前后端链路。
 
 ### 脱敏画像导入
 

@@ -182,9 +182,11 @@ def test_explicit_anchor_does_not_fallback_to_shanghai_local_rag(monkeypatch):
     assert "黄浦区" not in payload["intent"]["constraints"]["preferred_districts"]
     assert "徐汇区" not in payload["intent"]["constraints"]["preferred_districts"]
     assert payload["intent"]["extracted_preferences"]["anchor_text"] == "北京金鱼胡同"
-    assert payload["candidates"] == []
-    assert payload["routes"] == []
-    assert any("未使用本地 RAG" in item for item in payload["trace"])
+    assert payload["candidates"]
+    assert payload["routes"]
+    assert all(candidate["poi"]["district"] == "北京" for candidate in payload["candidates"])
+    assert all(candidate["poi"]["latitude"] > 39 for candidate in payload["candidates"])
+    assert any("锚点 POI" in item for item in payload["trace"])
 
 
 def test_short_xiaotuan_place_query_extracts_anchor_from_planning_phrase(monkeypatch):
@@ -352,6 +354,193 @@ def test_selected_pois_are_pinned_and_completed():
     assert "深大收藏咖啡" in names
     assert "深大收藏轻食" in names
     assert len(names) >= 3
+
+
+def test_poi_detail_fixed_start_stays_first_after_plan_and_adjust(monkeypatch):
+    class FakeAMapClient:
+        enabled = True
+
+        def resolve_anchor(self, text=None, city_hint=None, anchor_location=None):
+            return api.AMapAnchor(
+                text=text or "gaga金地威新中心店",
+                city="深圳",
+                location=anchor_location or GeoPoint(latitude=22.53461, longitude=113.94016),
+                source="context_location",
+            )
+
+        def search_pois(self, anchor, categories, keywords=None, radius_meters=3000, limit_per_category=8):
+            return [
+                POI(
+                    id="detail-culture",
+                    name="深圳湾艺文空间",
+                    category=POICategory.ATTRACTION,
+                    address="深圳市南山区",
+                    district="南山区",
+                    latitude=22.532,
+                    longitude=113.936,
+                    rating=4.7,
+                    review_count=900,
+                    price_per_person=0,
+                    avg_wait_minutes=4,
+                    business_hours={"open": "10:00", "close": "22:00"},
+                    tags=["文化", "展览"],
+                    ugc_summary="适合从 gaga 出发后的文化点。",
+                    visit_duration_minutes=50,
+                    source="amap",
+                    external_id="detail-culture",
+                    distance_from_anchor_meters=450,
+                ),
+                POI(
+                    id="detail-walk",
+                    name="科技园街区漫步",
+                    category=POICategory.SHOPPING,
+                    address="深圳市南山区",
+                    district="南山区",
+                    latitude=22.536,
+                    longitude=113.942,
+                    rating=4.6,
+                    review_count=600,
+                    price_per_person=30,
+                    avg_wait_minutes=3,
+                    business_hours={"open": "10:00", "close": "22:00"},
+                    tags=["街区", "散步"],
+                    ugc_summary="适合饭后散步。",
+                    visit_duration_minutes=45,
+                    source="amap",
+                    external_id="detail-walk",
+                    distance_from_anchor_meters=260,
+                ),
+                POI(
+                    id="detail-cafe",
+                    name="科技园咖啡休息点",
+                    category=POICategory.CAFE,
+                    address="深圳市南山区",
+                    district="南山区",
+                    latitude=22.535,
+                    longitude=113.938,
+                    rating=4.8,
+                    review_count=500,
+                    price_per_person=45,
+                    avg_wait_minutes=5,
+                    business_hours={"open": "10:00", "close": "22:00"},
+                    tags=["咖啡"],
+                    ugc_summary="中途休息点。",
+                    visit_duration_minutes=40,
+                    source="amap",
+                    external_id="detail-cafe",
+                    distance_from_anchor_meters=300,
+                ),
+            ]
+
+        def route_segment(self, *args, **kwargs):
+            return None
+
+        def recent_errors(self):
+            return []
+
+    monkeypatch.setattr(api, "AMapClient", FakeAMapClient)
+    client = TestClient(app)
+    gaga = {
+        "id": "fav-gaga-jdw",
+        "name": "gaga（金地威新中心店）",
+        "category": "餐饮",
+        "address": "深圳市南山区高新南环路金地威新中心",
+        "district": "南山区",
+        "latitude": 22.53461,
+        "longitude": 113.94016,
+        "rating": 4.5,
+        "review_count": 1661,
+        "price_per_person": 78,
+        "avg_wait_minutes": 16,
+        "business_hours": {"open": "10:00", "close": "22:00"},
+        "tags": ["轻食", "可预订"],
+        "ugc_summary": "当前详情页商户，必须作为路线起点。",
+        "visit_duration_minutes": 60,
+        "source": "context",
+    }
+    route_context = {
+        "source": "detail",
+        "city_hint": "深圳",
+        "anchor_text": "gaga金地威新中心店",
+        "anchor_location": {"latitude": 22.53461, "longitude": 113.94016},
+        "selected_pois": [gaga],
+        "fixed_start_poi_id": "fav-gaga-jdw",
+        "pinned_policy": "fixed_start",
+    }
+    plan_response = client.post(
+        "/api/plan",
+        json={
+            "query": "从gaga金地威新中心店出发，下午3小时顺路逛逛，少走路",
+            "user_id": "fixed-start-detail-user",
+            "route_context": route_context,
+        },
+    )
+
+    assert plan_response.status_code == 200
+    route = plan_response.json()["routes"][0]["route"]
+    assert route["stops"][0]["poi"]["id"] == "fav-gaga-jdw"
+
+    adjust_response = client.post(
+        "/api/adjust",
+        json={
+            "query": "从gaga金地威新中心店出发，下午3小时顺路逛逛，少走路",
+            "instruction": "少走路一点",
+            "route": route,
+            "user_id": "fixed-start-detail-user",
+            "route_context": route_context,
+        },
+    )
+
+    assert adjust_response.status_code == 200
+    adjusted_route = adjust_response.json()["route"]["route"]
+    assert adjusted_route["stops"][0]["poi"]["id"] == "fav-gaga-jdw"
+
+
+def test_search_preview_returns_real_candidates_and_plan_context(monkeypatch):
+    class FakeAMapClient:
+        enabled = True
+
+        def resolve_anchor(self, text=None, city_hint=None, anchor_location=None):
+            return api.AMapAnchor(
+                text="广州永庆坊",
+                city="广州",
+                location=GeoPoint(latitude=23.114821, longitude=113.237495),
+                source="amap_poi_text",
+            )
+
+        def search_pois(self, anchor, categories, keywords=None, radius_meters=3000, limit_per_category=8):
+            return [
+                POI(**make_adjust_test_poi("永庆坊", POICategory.ATTRACTION, 1, price=0, wait=5)),
+                POI(**make_adjust_test_poi("粤剧艺术博物馆", POICategory.ATTRACTION, 2, price=0, wait=6)),
+                POI(**make_adjust_test_poi("恩宁路骑楼街区", POICategory.SHOPPING, 3, price=20, wait=3)),
+                POI(**make_adjust_test_poi("陈添记西关小食", POICategory.RESTAURANT, 4, price=55, wait=12)),
+                POI(**make_adjust_test_poi("西关咖啡休息点", POICategory.CAFE, 5, price=38, wait=8)),
+            ]
+
+        def recent_errors(self):
+            return []
+
+    monkeypatch.setattr(api, "AMapClient", FakeAMapClient)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/search-preview",
+        json={
+            "query": "广州永庆坊附近逛吃3小时",
+            "history_terms": ["粤菜", "文化点", "散步"],
+            "city_hint": "广州",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["anchor"]["text"] == "广州永庆坊"
+    assert len(payload["candidates"]) >= 4
+    assert payload["route_context"]["source"] == "search"
+    assert payload["route_context"]["city_hint"] == "广州"
+    assert payload["route_context"]["anchor_text"] == "广州永庆坊"
+    assert len(payload["route_context"]["selected_pois"]) >= 2
+    assert "SmartRoute" in payload["trigger_title"]
 
 
 def test_amap_route_polyline_is_exposed_when_adapter_returns_segments(monkeypatch):

@@ -1,3 +1,5 @@
+import json
+
 from core.models import GeoPoint, POICategory
 from core.services.amap_client import AMapAnchor, AMapClient
 
@@ -65,3 +67,30 @@ def test_amap_search_uses_text_fallback_when_around_hits_daily_limit(monkeypatch
     assert all(poi.source == "amap" for poi in pois)
     assert all((poi.distance_from_anchor_meters or 0) <= 3000 for poi in pois)
     assert any("place/around" in error for error in client.recent_errors())
+
+
+def test_amap_get_caches_identical_requests(monkeypatch):
+    calls = {"count": 0}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps({"status": "1", "infocode": "10000", "pois": []}).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        calls["count"] += 1
+        return FakeResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    client = AMapClient(key="cache-test-key")
+
+    first = client._get("/v5/place/text", {"keywords": "广州永庆坊", "region": "广州"})
+    second = client._get("/v5/place/text", {"region": "广州", "keywords": "广州永庆坊"})
+
+    assert first == second
+    assert calls["count"] == 1

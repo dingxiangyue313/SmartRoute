@@ -175,6 +175,8 @@ const SCENARIOS = [
       anchor_text: "gaga金地威新中心店",
       anchor_location: { latitude: DETAIL_POI.latitude, longitude: DETAIL_POI.longitude },
       selected_pois: [DETAIL_POI],
+      fixed_start_poi_id: DETAIL_POI.id,
+      pinned_policy: "fixed_start",
     },
   },
 ];
@@ -650,31 +652,116 @@ function SmartRouteEntryCard({ title, text, action, onOpen, loading }) {
 }
 
 function SearchScene({ scenario, onOpen, loading }) {
+  const historyTerms = ["粤菜", "文化点", "散步", "低排队"];
+  const [searchText, setSearchText] = useState("广州永庆坊附近逛吃3小时");
+  const [preview, setPreview] = useState(null);
+  const [selectedIds, setSelectedIds] = useState([]);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState("");
+
+  async function loadPreview(nextText = searchText) {
+    const trimmed = nextText.trim();
+    if (!trimmed) return;
+    setPreviewLoading(true);
+    setPreviewError("");
+    try {
+      const payload = await postJson("/api/search-preview", {
+        query: trimmed,
+        history_terms: historyTerms,
+        city_hint: inferCityHint(trimmed) || scenario.routeContext?.city_hint || APP_CURRENT_CITY,
+      });
+      setPreview(payload);
+      const defaults = (payload.route_context?.selected_pois || []).map((poi) => poi.id);
+      setSelectedIds(defaults.length ? defaults : (payload.candidates || []).slice(0, 4).map((item) => item.poi.id));
+    } catch (err) {
+      setPreviewError(err.message || "搜索预览失败");
+      setPreview(null);
+      setSelectedIds([]);
+    } finally {
+      setPreviewLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    loadPreview(searchText);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const candidates = preview?.candidates || [];
+  const selectedPois = candidates
+    .filter((item) => selectedIds.includes(item.poi.id))
+    .map((item) => item.poi);
+  const routeContext = preview?.route_context
+    ? { ...preview.route_context, selected_pois: selectedPois }
+    : scenario.routeContext;
+  const routeQuery = `${searchText}，把我勾选的地点排成一条可执行路线`;
+
+  function toggleCandidate(id) {
+    setSelectedIds((ids) => {
+      if (ids.includes(id)) return ids.filter((item) => item !== id);
+      if (ids.length >= 5) return ids;
+      return [...ids, id];
+    });
+  }
+
   return (
     <div className="meituan-page">
       <div className="mt-header">
         <strong>搜索</strong>
         <span>问小团</span>
       </div>
-      <div className="mt-searchbar">深圳大学 附近 下午怎么玩 <b>搜索</b></div>
+      <label className="mt-searchbar interactive">
+        <input
+          value={searchText}
+          onChange={(event) => setSearchText(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") loadPreview();
+          }}
+          placeholder="输入商圈/地点/想法"
+        />
+        <button type="button" onClick={() => loadPreview()} disabled={previewLoading}>
+          {previewLoading ? "搜索中" : "搜索"}
+        </button>
+      </label>
       <section className="mt-section">
         <h3>历史搜索</h3>
         <div className="mt-chips">
-          <span>深圳大学</span><span>咖啡</span><span>展览</span><span>轻食</span>
+          {["永庆坊", ...historyTerms].map((term) => <span key={term}>{term}</span>)}
         </div>
       </section>
       <SmartRouteEntryCard
-        title="已找到可串联地点"
-        text="根据深圳大学、下午、3 小时，从附近商户和文化/娱乐 POI 中生成不绕路路线。"
+        title={preview?.trigger_title || "搜索后生成路线"}
+        text={preview?.trigger_text || "先从搜索结果和历史偏好中召回真实 POI，再把你勾选的地点串成路线。"}
         action="智能排路线"
-        onOpen={() => onOpen(scenario.query, scenario.routeContext)}
-        loading={loading}
+        onOpen={() => onOpen(routeQuery, routeContext)}
+        loading={loading || previewLoading}
       />
+      {previewError && <p className="search-preview-error">{previewError}</p>}
+      {preview?.anchor && (
+        <section className="mt-section search-preview-anchor">
+          <h3>当前锚点</h3>
+          <p>{preview.anchor.text} · {preview.anchor.city} · {preview.anchor.source}</p>
+        </section>
+      )}
       <section className="mt-section">
-        <h3>美团热搜</h3>
-        {["深大附近咖啡低排队", "南山博物馆展览", "科技园轻食晚餐"].map((item) => (
-          <article className="mt-list-item" key={item}><span>{item}</span><small>热度上升</small></article>
+        <h3>搜索结果可加入路线</h3>
+        {candidates.length === 0 && (
+          <article className="mt-list-item"><span>{previewLoading ? "正在召回附近 POI" : "暂无候选 POI"}</span><small>可换商圈</small></article>
+        )}
+        {candidates.slice(0, 8).map((item) => (
+          <article
+            className={`mt-list-item search-poi-item ${selectedIds.includes(item.poi.id) ? "checked" : ""}`}
+            key={item.poi.id}
+            onClick={() => toggleCandidate(item.poi.id)}
+          >
+            <div>
+              <span>{item.poi.name}</span>
+              <p>{item.poi.category} · {item.reason}</p>
+            </div>
+            <button type="button">{selectedIds.includes(item.poi.id) ? "已选" : "加入"}</button>
+          </article>
         ))}
+        {preview?.warnings?.map((warning) => <p className="search-preview-warning" key={warning}>{warning}</p>)}
       </section>
     </div>
   );
@@ -724,7 +811,7 @@ function InlineRouteResultCard({ message, isLatest, onFeedback, onAdjust, loadin
   function submit(value = draft) {
     const trimmed = value.trim();
     if (!trimmed) return;
-    onAdjust(trimmed, { planOverride: plan, routeViewOverride: routeView });
+    onAdjust(trimmed, { planOverride: plan, routeViewOverride: routeView, routeContextOverride: plan?.client_route_context });
     setDraft("");
   }
 
@@ -1701,6 +1788,14 @@ function AgentPanel({
             <span>触发方式</span>
             <p>{scenario.trigger}</p>
           </div>
+          <div>
+            <span>产品定位</span>
+            <p>小团 AI 是入口和通用对话层；SmartRoute 是被小团、搜索、收藏和详情页调起的路线执行 Agent。</p>
+          </div>
+          <div>
+            <span>执行链路</span>
+            <p>小团识别路线意图 → SmartRoute 调用 POI/地图/画像工具 → 输出可调整的可执行路线。</p>
+          </div>
           {plan?.intent?.extracted_preferences?.anchor_text && (
             <div>
               <span>地图锚点</span>
@@ -1812,13 +1907,13 @@ function AgentPanel({
       <section className="panel demo-script-panel">
         <div className="section-head">
           <h2>演示脚本</h2>
-          <span>P1b 闭环</span>
+          <span>交付日</span>
         </div>
         <ol className="trace-list">
-          <li>同一句 query 切换三种画像，观察 POI、解释和指标变化。</li>
-          <li>点击追问卡里的“少走路 / 不要排队 / 便宜点”。</li>
+          <li>搜索页先展示真实候选 POI，再勾选 2-5 个地点生成路线。</li>
+          <li>POI 详情页从 gaga 出发时，确认第 1 站固定不被排序挪走。</li>
+          <li>小团只负责识别意图，SmartRoute 负责约束规划、地图、调整和反馈闭环。</li>
           <li>展示调整状态、站点变化、等待/预算/移动 delta。</li>
-          <li>若无法改善，展示放宽预算、排队、区域或时间的补救建议。</li>
         </ol>
       </section>
 
@@ -1920,6 +2015,8 @@ function contextForScenario(scenario, nextQuery, explicitContext = null) {
     anchor_location: base.anchor_location || null,
     selected_pois: base.selected_pois || [],
     transport_strategy: base.transport_strategy || null,
+    fixed_start_poi_id: base.fixed_start_poi_id || null,
+    pinned_policy: base.pinned_policy || null,
   };
 }
 
@@ -2075,13 +2172,14 @@ export default function App() {
         profile_id: source === "manual_import" ? profileId : null,
         route_context: nextRouteContext,
       });
-      setPlan(payload);
+      const payloadWithContext = { ...payload, client_route_context: nextRouteContext };
+      setPlan(payloadWithContext);
       setSelectedRouteIndex(0);
       setAdjustmentHistory([]);
       if (openRoute) {
         setPhoneMode("route");
       }
-      return payload;
+      return payloadWithContext;
     } catch (err) {
       setError(err.message || "生成失败");
       return null;
@@ -2368,6 +2466,7 @@ export default function App() {
     setError("");
     setFeedbackStatus("");
     try {
+      const requestRouteContext = options.routeContextOverride || basePlan.client_route_context || activeRouteContext;
       const payload = await postJson("/api/adjust", {
         query: basePlan.query || query,
         instruction,
@@ -2376,7 +2475,7 @@ export default function App() {
         profile_mode: profileMode,
         profile_source: profileSource,
         profile_id: profileSource === "manual_import" ? importedProfileId : null,
-        route_context: activeRouteContext,
+        route_context: requestRouteContext,
       });
       const baseRoutes = basePlan.routes || [];
       const matchingIndex = baseRoutes.findIndex((routeView) => routeView.route.id === baseRouteView.route.id);
@@ -2390,6 +2489,7 @@ export default function App() {
       const nextPlan = {
         ...basePlan,
         routes: nextRoutes,
+        client_route_context: requestRouteContext,
         planning_time_ms: payload.planning_time_ms,
         follow_up_question: payload.follow_up_question,
         follow_up: payload.follow_up,

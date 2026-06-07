@@ -66,7 +66,7 @@ XiaoTuan Query
 - `ToolUse Adjustment Chain`：`/api/adjust` 以 ReAct / ToolUse 风格组织 Parse adjustment、Search replacement POI、Validate constraints、Update route、Explain changes，并返回 `tool_trace` 给前端展示。
 - `Live Location Gate`：判断请求是否包含明确城市、地标、商圈、入口坐标或已选 POI。命中后进入真实地点模式，禁止跨城回退到本地 RAG。
 - `POIRetrieverAgent`：根据约束和用户画像，从本地索引召回候选 POI；仅用于无明确地点的通用演示或本地兜底，不覆盖真实地点模式。
-- `AMapClient`：使用 `AMAP_WEB_SERVICE_KEY` 调用高德 Web 服务，优先用 POI 文本搜索把“北京金鱼胡同/中山大学/深圳大学/三里屯/外滩/当前店铺”解析为真实锚点，地理编码作为兜底；随后召回周边 POI，并补充真实道路 polyline。适配器会记录最近错误，便于排查 Key 类型、权限、额度或网络问题。
+- `AMapClient`：使用 `AMAP_WEB_SERVICE_KEY` 调用高德 Web 服务，优先用 POI 文本搜索把“广州永庆坊/北京金鱼胡同/中山大学/深圳大学/三里屯/外滩/当前店铺”解析为真实锚点，地理编码作为兜底；随后召回周边 POI，并补充真实道路 polyline。适配器会记录最近错误，便于排查 Key 类型、权限、额度或网络问题，并对同路径同参数请求做 30 分钟内存 TTL 缓存，降低交付演示时的重复调用风险。
 - `RoutePlannerAgent`：生成紧凑、高分、低等待等路线变体。
 - `UserProfileManager`：读取和写入 SQLite 用户画像，沉淀喜欢/不合适反馈。
 - `route_insight`：生成可信度、约束命中、预算剩余、步行强度、人群适配和风险解释。
@@ -94,7 +94,7 @@ XiaoTuan Query
 - `FollowUp` / `FollowUpOption`：结构化追问卡，选项可直接映射为 `/api/adjust` 指令。
 - `RouteMetrics` / `MetricDeltas`：记录调整前后总时长、人均、等待、交通和站点数变化。
 - `ChangedStop`：记录局部调整替换、重排或新增了哪些站点。
-- `RouteContext`：前端入口上下文，包含 `source`、`city_hint`、`anchor_text`、`anchor_location`、`selected_pois` 和 `transport_strategy`。
+- `RouteContext`：前端入口上下文，包含 `source`、`city_hint`、`anchor_text`、`anchor_location`、`selected_pois`、`transport_strategy`、`fixed_start_poi_id` 和 `pinned_policy`。
 - `AgentTraceStep`：P2 新增，用于展示每一步工具调用的工具名、输入摘要、输出摘要和状态。
 - `POI.source / external_id / distance_from_anchor_meters`：标记 POI 来自高德、入口已选或本地兜底。
 - `Route.map_polyline / transit_segments`：承载高德路径规划或本地估算路径，前端优先按 polyline 绘制。
@@ -126,10 +126,17 @@ XiaoTuan Query
 - 返回 `open_plugin`、`ask_confirm` 或 `normal_answer`，以及置信度、触发理由、识别槽位和 SmartRoute 规划 query。
 - 优先使用 DeepSeek；无 Key、超时或返回不合法时使用规则兜底。
 
+`POST /api/search-preview`
+
+- 输入搜索页 query、历史搜索词和城市提示。
+- 先解析真实地图锚点，再调用高德召回 4-8 个候选 POI，返回候选列表、默认勾选 POI 和可直接传给 `/api/plan` 的 `route_context`。
+- 用于搜索页“先搜索结果，再触发 SmartRoute”的交互，避免搜索入口只是静态卡片。
+
 `POST /api/plan`
 
 - 输入自然语言 query、user_id、路线数量、`profile_source`、可选 `profile_id`，以及可选 `route_context`。
 - `route_context` 支持搜索/小团的地点锚点、收藏夹已选 POI、POI 详情页当前商户坐标。
+- POI 详情页可传 `fixed_start_poi_id` 与 `pinned_policy="fixed_start"`，路线排序、替换和调整都必须保留当前商户为第 1 站。
 - 返回解析意图、用户画像、画像来源、模拟/脱敏画像上下文、候选 POI、路线方案、生成 trace、规划耗时、画像影响、冲突解释、路线完整性和结构化生成后追问。
 - P2 返回 `tool_trace`，展示 LLM/规则解析、画像构建、POI 搜索、路线规划和高德路径分段。
 - 真实地点模式：若 query 或 `route_context` 含明确地点/城市/坐标，候选必须来自高德或入口已选 POI；高德失败时返回空候选和失败 trace，不进入上海本地 RAG。
@@ -171,6 +178,7 @@ XiaoTuan Query
 - `parser_source / parser_confidence / parser_reason / llm_slots`：记录需求解析来自 DeepSeek 还是规则兜底。
 - `tool_trace`：P2 Agent Trace，前端用于展示 ReAct / ToolUse 链路。
 - `RouteContext.transport_strategy`：入口或评委即时画像指定的交通策略，例如步行优先、公交/地铁优先、打车优先。
+- `RouteContext.fixed_start_poi_id / pinned_policy`：详情页固定起点或搜索/收藏软固定策略，防止排序和调整把入口核心 POI 挪走。
 
 ## 6. P2 即时画像策略
 

@@ -581,8 +581,6 @@ class RoutePlannerAgent:
         return reranked
 
     def _best_itinerary_order(self, intent: ParsedIntent, pois: list[POI]) -> list[POI]:
-        if len(pois) <= 2:
-            return pois
         unique_pois = []
         seen = set()
         for poi in pois:
@@ -592,6 +590,16 @@ class RoutePlannerAgent:
             unique_pois.append(poi)
         if len(unique_pois) > 6:
             unique_pois = unique_pois[:6]
+        fixed_start_id = str(intent.extracted_preferences.get("fixed_start_poi_id") or "")
+        fixed_start = next((poi for poi in unique_pois if poi.id == fixed_start_id), None)
+        if fixed_start:
+            remaining_unique = [poi for poi in unique_pois if poi.id != fixed_start.id]
+            if len(remaining_unique) <= 1:
+                return [fixed_start, *remaining_unique]
+            unique_pois = remaining_unique
+        if len(unique_pois) <= 2:
+            ordered = unique_pois
+            return [fixed_start, *ordered] if fixed_start else ordered
 
         raw_query = str(intent.extracted_preferences.get("raw_query", ""))
         is_evening = any(word in raw_query for word in ["晚上", "今晚", "晚餐", "夜"])
@@ -636,6 +644,9 @@ class RoutePlannerAgent:
             score -= distance * 0.7
             return score
 
+        if fixed_start:
+            best_remaining = max(permutations(unique_pois), key=lambda order: order_score((fixed_start, *order)))
+            return [fixed_start, *best_remaining]
         return list(max(permutations(unique_pois), key=order_score))
 
     def _structure_warnings(self, intent: ParsedIntent, pois: list[POI]) -> list[str]:

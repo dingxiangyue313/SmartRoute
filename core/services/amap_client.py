@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import os
+import time
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -15,6 +16,8 @@ from core.rag.vector_store import haversine_km
 
 AMAP_REST_BASE = "https://restapi.amap.com"
 DEFAULT_RADIUS_METERS = 3000
+AMAP_CACHE_TTL_SECONDS = 30 * 60
+_AMAP_RESPONSE_CACHE: dict[tuple[str, tuple[tuple[str, str], ...]], tuple[float, dict[str, Any]]] = {}
 
 KNOWN_ANCHORS: dict[str, tuple[str, GeoPoint]] = {
     "深圳大学": ("深圳", GeoPoint(latitude=22.53332, longitude=113.93646)),
@@ -376,6 +379,11 @@ class AMapClient:
     def _get(self, path: str, params: dict[str, str]) -> dict[str, Any]:
         query = {key: value for key, value in params.items() if value not in (None, "")}
         query["key"] = self.key
+        cache_key = (path, tuple(sorted((key, str(value)) for key, value in query.items())))
+        now = time.monotonic()
+        cached = _AMAP_RESPONSE_CACHE.get(cache_key)
+        if cached and now - cached[0] <= AMAP_CACHE_TTL_SECONDS:
+            return json.loads(json.dumps(cached[1], ensure_ascii=False))
         url = f"{AMAP_REST_BASE}{path}?{urllib.parse.urlencode(query)}"
         request = urllib.request.Request(url, headers={"User-Agent": "SmartRoute-Demo/1.0"})
         with urllib.request.urlopen(request, timeout=self.timeout) as response:
@@ -384,6 +392,7 @@ class AMapClient:
         infocode = str(payload.get("infocode", "10000"))
         if status != "1" or infocode != "10000":
             raise RuntimeError(payload.get("info") or "AMap request failed")
+        _AMAP_RESPONSE_CACHE[cache_key] = (now, payload)
         return payload
 
     def _remember_error(self, scope: str, error: Exception) -> None:

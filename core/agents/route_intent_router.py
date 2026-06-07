@@ -401,7 +401,8 @@ class RouteIntentRouterAgent:
         missing_codes = self._missing_required_codes(filled_slots)
         missing_labels = [self._slot_label(code) for code in missing_codes]
         detected_slots = dict(result.detected_slots or {})
-        detected_slots["missing_slots"] = missing_labels
+        detected_slots["missing_slots"] = missing_codes
+        detected_slots["missing_slot_labels"] = missing_labels
         detected_slots["filled_slots"] = filled_slots
 
         merged_query = self._build_merged_query(query, filled_slots, previous_intent)

@@ -382,6 +382,17 @@ main {
   color: #777;
 }
 
+.mt-searchbar.interactive input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  background: transparent;
+  outline: none;
+  color: #111;
+  font: inherit;
+  font-weight: 800;
+}
+
 .mt-searchbar b {
   height: 38px;
   min-width: 68px;
@@ -390,6 +401,16 @@ main {
   color: #111;
   display: grid;
   place-items: center;
+}
+
+.mt-searchbar button {
+  height: 38px;
+  min-width: 68px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--yellow);
+  color: #111;
+  font-weight: 950;
 }
 
 .mt-section {
@@ -476,6 +497,54 @@ main {
 .mt-list-item {
   display: flex;
   justify-content: space-between;
+}
+
+.search-poi-item {
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.search-poi-item.checked {
+  border-color: #ffd100;
+  background: #fffbea;
+}
+
+.search-poi-item div {
+  min-width: 0;
+}
+
+.search-poi-item span {
+  display: block;
+  color: #111;
+  font-weight: 950;
+}
+
+.search-poi-item p,
+.search-preview-anchor p,
+.search-preview-warning,
+.search-preview-error {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.search-poi-item button {
+  border: 0;
+  border-radius: 999px;
+  background: #111;
+  color: #fff;
+  padding: 7px 12px;
+  font-weight: 950;
+}
+
+.search-poi-item.checked button {
+  background: var(--yellow);
+  color: #111;
+}
+
+.search-preview-error {
+  color: #c63524;
 }
 
 .favorite-item {
