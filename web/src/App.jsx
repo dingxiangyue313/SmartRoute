@@ -724,7 +724,7 @@ function InlineRouteResultCard({ message, isLatest, onFeedback, onAdjust, loadin
   function submit(value = draft) {
     const trimmed = value.trim();
     if (!trimmed) return;
-    onAdjust(trimmed);
+    onAdjust(trimmed, { planOverride: plan, routeViewOverride: routeView });
     setDraft("");
   }
 
@@ -2360,36 +2360,48 @@ export default function App() {
   }
 
   async function adjustRoute(instruction, options = {}) {
-    if (!selectedRouteView || !plan) return;
+    const basePlan = options.planOverride || plan;
+    const baseRouteView = options.routeViewOverride || selectedRouteView;
+    if (!baseRouteView || !basePlan) return;
     setLoading(true);
     setLoadingLabel("局部调整中");
     setError("");
     setFeedbackStatus("");
     try {
       const payload = await postJson("/api/adjust", {
-        query: plan.query || query,
+        query: basePlan.query || query,
         instruction,
-        route: selectedRouteView.route,
+        route: baseRouteView.route,
         user_id: USER_ID,
         profile_mode: profileMode,
         profile_source: profileSource,
         profile_id: profileSource === "manual_import" ? importedProfileId : null,
         route_context: activeRouteContext,
       });
-      const nextRoutes = plan.routes.map((routeView, index) => (
-        index === selectedRouteIndex ? payload.route : routeView
+      const baseRoutes = basePlan.routes || [];
+      const matchingIndex = baseRoutes.findIndex((routeView) => routeView.route.id === baseRouteView.route.id);
+      const updateIndex = matchingIndex >= 0 ? matchingIndex : selectedRouteIndex;
+      const nextRoutes = baseRoutes.map((routeView, index) => (
+        index === updateIndex ? payload.route : routeView
       ));
-      setPlan({
-        ...plan,
+      if (!nextRoutes.length) {
+        nextRoutes.push(payload.route);
+      }
+      const nextPlan = {
+        ...basePlan,
         routes: nextRoutes,
         planning_time_ms: payload.planning_time_ms,
         follow_up_question: payload.follow_up_question,
         follow_up: payload.follow_up,
         constraint_conflicts: payload.constraint_conflicts,
         route_completeness: payload.route_completeness,
-        trace: [...(plan.trace || []), `实时调整：${payload.adjustment_summary}`],
-        tool_trace: plan.tool_trace || [],
+        trace: [...(basePlan.trace || []), `实时调整：${payload.adjustment_summary}`],
+        tool_trace: basePlan.tool_trace || [],
+      };
+      setPlan({
+        ...nextPlan,
       });
+      setSelectedRouteIndex(Math.max(0, updateIndex));
       setLatestAdjustment(payload);
       setFeedbackStatus(`${statusText(payload.adjustment_status)}：${payload.adjustment_summary}`);
       const deltas = payload.metric_deltas || {};
@@ -2412,16 +2424,8 @@ export default function App() {
             role: "assistant",
             type: "route_result",
             text: `已调整路线：${payload.route.route.title}`,
-            query: plan.query || query,
-            plan: {
-              ...plan,
-              routes: nextRoutes,
-              planning_time_ms: payload.planning_time_ms,
-              follow_up_question: payload.follow_up_question,
-              follow_up: payload.follow_up,
-              constraint_conflicts: payload.constraint_conflicts,
-              route_completeness: payload.route_completeness,
-            },
+            query: basePlan.query || query,
+            plan: nextPlan,
             routeView: payload.route,
           },
         ]);
@@ -2436,8 +2440,8 @@ export default function App() {
     }
   }
 
-  function adjustRouteFromXiaotuan(instruction) {
-    return adjustRoute(instruction, { appendToXiaotuan: true });
+  function adjustRouteFromXiaotuan(instruction, options = {}) {
+    return adjustRoute(instruction, { ...options, appendToXiaotuan: true });
   }
 
   async function sendFeedback(value, routeViewOverride = null) {
