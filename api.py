@@ -1874,6 +1874,27 @@ def add_intent_satisfied(categories: set[POICategory] | None, route: Route) -> b
     return any(stop.poi.category in categories for stop in route.stops)
 
 
+def adjustment_search_terms(instruction: str, categories: set[POICategory] | None) -> list[str]:
+    text = instruction.strip()
+    terms: list[str] = []
+    if categories and POICategory.RESTAURANT in categories:
+        if "粤菜" in text:
+            terms.extend(["粤菜", "广东菜", "酒楼", "地道粤菜", "餐厅"])
+        elif any(word in text for word in ["火锅", "烧烤", "小吃"]):
+            terms.extend([word for word in ["火锅", "烧烤", "小吃", "餐厅"] if word in text or word == "餐厅"])
+        else:
+            terms.extend(["餐厅", "本地菜", "特色菜"])
+    if categories and POICategory.CAFE in categories:
+        terms.extend(["咖啡", "茶饮", "下午茶", "甜品"])
+    if categories and POICategory.ATTRACTION in categories:
+        terms.extend(["文化", "展览", "博物馆", "艺术馆"])
+    if categories and POICategory.SHOPPING in categories:
+        terms.extend(["街区", "步行街", "商场", "散步"])
+    if text:
+        terms.append(text)
+    return list(dict.fromkeys(terms))[:8]
+
+
 def adjustment_summary(
     kind: str,
     instruction: str,
@@ -2348,6 +2369,18 @@ def adjust_route(request: AdjustRequest) -> AdjustResponse:
         candidate = None
     else:
         candidate = find_adjustment_candidate(request.route, candidates, kind, target_index, categories)
+    if candidate is None and kind == "add" and categories and anchor and amap_client.enabled:
+        direct_terms = adjustment_search_terms(request.instruction, categories)
+        direct_pois = amap_client.search_pois(anchor, list(categories), keywords=direct_terms, radius_meters=3000, limit_per_category=8)
+        if direct_pois:
+            existing_candidate_ids = {poi.id for poi, _ in candidates}
+            for poi in direct_pois:
+                if poi.id not in existing_candidate_ids:
+                    candidates.append((poi, 2.8))
+            candidate = find_adjustment_candidate(request.route, candidates, kind, target_index, categories)
+            context_trace.append(
+                f"调整专用召回：围绕 {anchor.text} 用 {'、'.join(direct_terms[:4])} 追加 {len(direct_pois)} 个候选。"
+            )
     before_metrics = route_metrics(request.route)
     next_pois = [stop.poi for stop in request.route.stops]
     should_rebuild_route = kind == "walk" or candidate is not None

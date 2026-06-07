@@ -165,7 +165,7 @@ class AMapClient:
 
         for category in categories:
             type_codes = CATEGORY_TYPE_CODES.get(category, "")
-            query_terms = list(dict.fromkeys([*keywords_for_category(category), *terms]))[:3]
+            query_terms = list(dict.fromkeys([*terms, *keywords_for_category(category)]))[:4]
             target_count = min(3, limit_per_category)
             category_had_around_error = False
             for keyword in [*query_terms, ""]:
