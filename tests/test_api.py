@@ -621,6 +621,85 @@ def test_search_preview_returns_real_candidates_and_plan_context(monkeypatch):
     assert "SmartRoute" in payload["trigger_title"]
 
 
+def test_search_soft_selected_pois_do_not_block_route_generation(monkeypatch):
+    class FakeAMapClient:
+        enabled = True
+
+        def resolve_anchor(self, text=None, city_hint=None, anchor_location=None):
+            return api.AMapAnchor(
+                text=text or "广州永庆坊",
+                city="广州",
+                location=GeoPoint(latitude=23.114821, longitude=113.237495),
+                source="text",
+            )
+
+        def search_pois(self, anchor, categories, keywords=None, radius_meters=3000, limit_per_category=8):
+            return [
+                POI(**make_adjust_test_poi("红门咖啡", POICategory.CAFE, 1, price=42, rating=4.8)),
+                POI(**make_adjust_test_poi("急急脚咖啡公司", POICategory.CAFE, 2, price=38, rating=4.7)),
+                POI(**make_adjust_test_poi("CAFE FLOWERYARDS", POICategory.CAFE, 3, price=48, rating=4.6)),
+                POI(**make_adjust_test_poi("永庆坊", POICategory.ATTRACTION, 4, price=0, rating=4.8)),
+                POI(**make_adjust_test_poi("粤剧艺术博物馆", POICategory.ATTRACTION, 5, price=0, rating=4.7)),
+                POI(**make_adjust_test_poi("恩宁路骑楼街区", POICategory.SHOPPING, 6, price=20, rating=4.6)),
+                POI(**make_adjust_test_poi("陈添记西关小食", POICategory.RESTAURANT, 7, price=55, rating=4.6)),
+            ]
+
+        def route_segment(self, *args, **kwargs):
+            return None
+
+        def recent_errors(self):
+            return []
+
+    monkeypatch.setattr(api, "AMapClient", FakeAMapClient)
+    client = TestClient(app)
+    selected = [
+        {
+            "id": f"soft-cafe-{index}",
+            "name": name,
+            "category": "咖啡/茶饮",
+            "address": "广州永庆坊附近",
+            "district": "荔湾区",
+            "latitude": 23.1148 + index * 0.001,
+            "longitude": 113.2375 + index * 0.001,
+            "rating": 4.6,
+            "review_count": 300,
+            "price_per_person": 45,
+            "avg_wait_minutes": 8,
+            "business_hours": {"open": "10:00", "close": "22:00"},
+            "tags": ["咖啡"],
+            "ugc_summary": "搜索页随机勾选的同类候选，不应全部硬塞进路线。",
+            "visit_duration_minutes": 45,
+            "source": "amap",
+        }
+        for index, name in enumerate(["红门咖啡", "急急脚咖啡公司", "CAFE FLOWERYARDS"], start=1)
+    ]
+
+    response = client.post(
+        "/api/plan",
+        json={
+            "query": "广州永庆坊附近逛吃3小时，优先参考我勾选的地点生成路线",
+            "user_id": "search-soft-selected-user",
+            "route_context": {
+                "source": "search",
+                "city_hint": "广州",
+                "anchor_text": "广州永庆坊",
+                "selected_pois": selected,
+                "pinned_policy": "soft",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["routes"]
+    route = payload["routes"][0]["route"]
+    categories = [stop["poi"]["category"] for stop in route["stops"]]
+    stop_ids = {stop["poi"]["id"] for stop in route["stops"]}
+    assert categories.count("咖啡/茶饮") <= 1
+    assert any(category in {"景点", "娱乐", "购物"} for category in categories)
+    assert not all(item["id"] in stop_ids for item in selected)
+
+
 def test_amap_route_polyline_is_exposed_when_adapter_returns_segments(monkeypatch):
     class FakeAMapClient:
         enabled = True

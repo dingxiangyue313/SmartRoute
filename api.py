@@ -1015,6 +1015,8 @@ def hard_pinned_pois_for_context(route_context: RouteContext | None, selected_po
         return selected_pois
     if route_context.pinned_policy == "fixed_start" and route_context.fixed_start_poi_id:
         return [poi for poi in selected_pois if poi.id == route_context.fixed_start_poi_id][:1]
+    if route_context.pinned_policy == "soft":
+        return []
     return selected_pois
 
 
@@ -1079,6 +1081,8 @@ def build_dynamic_candidates(
     hard_pinned_pois = hard_pinned_pois_for_context(route_context, selected_pois)
     pinned_ids = {poi.id for poi in selected_pois}
     candidates: list[tuple[POI, float]] = [(poi, 3.0) for poi in selected_pois]
+    if route_context and route_context.pinned_policy == "soft" and selected_pois:
+        trace_notes.append("搜索页软选择：勾选 POI 仅作为高权重候选，若破坏路线结构会自动舍弃。")
     for poi in amap_pois:
         if poi.id in pinned_ids:
             continue
@@ -2347,7 +2351,7 @@ def search_preview(request: SearchPreviewRequest) -> SearchPreviewResponse:
         trigger_title=f"SmartRoute 已发现 {trigger_count} 个可串联地点",
         trigger_text=(
             f"根据“{request.query}”和历史搜索偏好，先召回附近真实 POI，"
-            "再把你勾选的地点作为路线候选生成可执行安排。"
+            "再优先参考你勾选的地点生成可执行安排；冲突项会自动舍弃。"
         ),
         warnings=list(dict.fromkeys(warnings))[:4],
     )

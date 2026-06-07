@@ -694,7 +694,7 @@ function SearchScene({ scenario, onOpen, loading }) {
   const routeContext = preview?.route_context
     ? { ...preview.route_context, selected_pois: selectedPois }
     : scenario.routeContext;
-  const routeQuery = `${searchText}，把我勾选的地点排成一条可执行路线`;
+  const routeQuery = `${searchText}，优先参考我勾选的地点生成一条可执行路线`;
 
   function toggleCandidate(id) {
     setSelectedIds((ids) => {
@@ -731,7 +731,7 @@ function SearchScene({ scenario, onOpen, loading }) {
       </section>
       <SmartRouteEntryCard
         title={preview?.trigger_title || "搜索后生成路线"}
-        text={preview?.trigger_text || "先从搜索结果和历史偏好中召回真实 POI，再把你勾选的地点串成路线。"}
+        text={preview?.trigger_text || "先从搜索结果和历史偏好中召回真实 POI，再优先参考你勾选的地点生成路线。"}
         action="智能排路线"
         onOpen={() => onOpen(routeQuery, routeContext)}
         loading={loading || previewLoading}
@@ -744,7 +744,7 @@ function SearchScene({ scenario, onOpen, loading }) {
         </section>
       )}
       <section className="mt-section">
-        <h3>搜索结果可加入路线</h3>
+        <h3>路线候选，可优先参考</h3>
         {candidates.length === 0 && (
           <article className="mt-list-item"><span>{previewLoading ? "正在召回附近 POI" : "暂无候选 POI"}</span><small>可换商圈</small></article>
         )}
